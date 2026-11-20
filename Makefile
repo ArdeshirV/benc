@@ -270,7 +270,7 @@ endif
 
 # ---------------------------------------------------------- macos-amd64 ------
 macos-amd64:
-ifneq (,$(filter x86_64 amd64,$(HOST_ARCH)))
+ifeq ($(HOST),macos)
 	@mkdir -p $(BUILD)/macos-amd64
 	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(MACOS_AMD64_CC),)
@@ -281,13 +281,13 @@ else ifneq ($(MACOS_AMD64_CC),)
 	@mkdir -p $(BUILD)/macos-amd64
 	$(MACOS_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else
-	@echo "macos-amd64: run this on x86_64 macOS, or set MACOS_AMD64_CC" >&2
+	@echo "macos-amd64: run this on macOS, or set MACOS_AMD64_CC (osxcross)" >&2
 	@exit 1
 endif
 
 # ---------------------------------------------------------- macos-arm64 ------
 macos-arm64:
-ifneq (,$(filter aarch64 arm64,$(HOST_ARCH)))
+ifeq ($(HOST),macos)
 	@mkdir -p $(BUILD)/macos-arm64
 	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(MACOS_ARM64_CC),)
@@ -298,7 +298,7 @@ else ifneq ($(MACOS_ARM64_CC),)
 	@mkdir -p $(BUILD)/macos-arm64
 	$(MACOS_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else
-	@echo "macos-arm64: run this on aarch64 macOS, or set MACOS_ARM64_CC" >&2
+	@echo "macos-arm64: run this on macOS, or set MACOS_ARM64_CC (osxcross)" >&2
 	@exit 1
 endif
 
@@ -331,7 +331,7 @@ endif
 
 # ------------------------------------------------------------ bsd-386 -------
 bsd-386:
-ifneq (,$(filter i386 i686,$(HOST_ARCH)))
+ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-386
 	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-386/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_386_CC),)
@@ -341,13 +341,13 @@ else ifneq ($(BSD_386_CC),)
 	@mkdir -p $(BUILD)/bsd-386
 	$(BSD_386_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-386/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else
-	@echo "bsd-386: run this on i386 *BSD, or set BSD_386_CC" >&2
+	@echo "bsd-386: run this on *BSD, or set BSD_386_CC" >&2
 	@exit 1
 endif
 
 # ----------------------------------------------------------- bsd-amd64 ------
 bsd-amd64:
-ifneq (,$(filter x86_64 amd64,$(HOST_ARCH)))
+ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-amd64
 	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_AMD64_CC),)
@@ -357,13 +357,13 @@ else ifneq ($(BSD_AMD64_CC),)
 	@mkdir -p $(BUILD)/bsd-amd64
 	$(BSD_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else
-	@echo "bsd-amd64: run this on x86_64 *BSD, or set BSD_AMD64_CC" >&2
+	@echo "bsd-amd64: run this on *BSD, or set BSD_AMD64_CC" >&2
 	@exit 1
 endif
 
 # -------------------------------------------------------------- bsd-arm ------
 bsd-arm:
-ifneq (,$(filter arm armv% armhf,$(HOST_ARCH)))
+ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-arm
 	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_ARM_CC),)
@@ -373,13 +373,13 @@ else ifneq ($(BSD_ARM_CC),)
 	@mkdir -p $(BUILD)/bsd-arm
 	$(BSD_ARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else
-	@echo "bsd-arm: run this on arm *BSD, or set BSD_ARM_CC" >&2
+	@echo "bsd-arm: run this on *BSD, or set BSD_ARM_CC" >&2
 	@exit 1
 endif
 
 # ----------------------------------------------------------- bsd-arm64 ------
 bsd-arm64:
-ifneq (,$(filter aarch64 arm64,$(HOST_ARCH)))
+ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-arm64
 	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_ARM64_CC),)
@@ -389,7 +389,7 @@ else ifneq ($(BSD_ARM64_CC),)
 	@mkdir -p $(BUILD)/bsd-arm64
 	$(BSD_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
 else
-	@echo "bsd-arm64: run this on aarch64 *BSD, or set BSD_ARM64_CC" >&2
+	@echo "bsd-arm64: run this on *BSD, or set BSD_ARM64_CC" >&2
 	@exit 1
 endif
 
@@ -510,18 +510,18 @@ check:
 	@printf '%-14s: %s\n' "windows-386"   "$(if $(shell command -v $(WIN32_CC) 2>/dev/null),$(WIN32_CC),not found)"
 	@printf '%-14s: %s\n' "dos"           "$(if $(shell command -v $(DOS_CC) 2>/dev/null),$(DOS_CC),not found)"
 	@printf '%-14s: %s\n' "macos"         "$(if $(MACOS_CC),$(MACOS_CC),$(if $(filter macos,$(HOST)),native cc,not found))"
-	@printf '%-14s: %s\n' "termux"        "$(if $(TERMUX_CC),$(TERMUX_CC),$(if $(filter termux,$(HOST)),native cc,not found))"
-	@printf '%-14s: %s\n' "bsd"           "$(if $(BSD_CC),$(BSD_CC),$(if $(filter bsd,$(HOST)),native cc,not found))"
-	@printf '%-14s: %s\n' "linux-386"     "$(if $(LINUX_386_CC),$(LINUX_386_CC),$(if $(filter i386 i686,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "linux-amd64"   "$(if $(LINUX_AMD64_CC),$(LINUX_AMD64_CC),$(if $(filter x86_64 amd64,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "linux-arm"     "$(if $(LINUX_ARM_CC),$(LINUX_ARM_CC),$(if $(filter arm armv% armhf,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "linux-arm64"   "$(if $(LINUX_ARM64_CC),$(LINUX_ARM64_CC),$(if $(filter aarch64 arm64,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "macos-amd64"   "$(if $(MACOS_AMD64_CC),$(MACOS_AMD64_CC),$(if $(filter x86_64 amd64,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "macos-arm64"   "$(if $(MACOS_ARM64_CC),$(MACOS_ARM64_CC),$(if $(filter aarch64 arm64,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "bsd-386"       "$(if $(BSD_386_CC),$(BSD_386_CC),$(if $(filter i386 i686,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "bsd-amd64"     "$(if $(BSD_AMD64_CC),$(BSD_AMD64_CC),$(if $(filter x86_64 amd64,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "bsd-arm"       "$(if $(BSD_ARM_CC),$(BSD_ARM_CC),$(if $(filter arm armv% armhf,$(HOST_ARCH)),native cc,not set"))
-	@printf '%-14s: %s\n' "bsd-arm64"     "$(if $(BSD_ARM64_CC),$(BSD_ARM64_CC),$(if $(filter aarch64 arm64,$(HOST_ARCH)),native cc,not set"))
+	@printf '%-14s: %s\n' "termux"        "$(if $(TERMUX_CC),$(TERMUX_CC),not found)"
+	@printf '%-14s: %s\n' "bsd"           "$(if $(BSD_CC),$(BSD_CC),not found)"
+	@printf '%-14s: %s\n' "linux-386"     "$(if $(LINUX_386_CC),$(LINUX_386_CC),not set)"
+	@printf '%-14s: %s\n' "linux-amd64"   "$(if $(LINUX_AMD64_CC),$(LINUX_AMD64_CC),not set)"
+	@printf '%-14s: %s\n' "linux-arm"     "$(if $(LINUX_ARM_CC),$(LINUX_ARM_CC),not set)"
+	@printf '%-14s: %s\n' "linux-arm64"   "$(if $(LINUX_ARM64_CC),$(LINUX_ARM64_CC),not set)"
+	@printf '%-14s: %s\n' "macos-amd64"   "$(if $(MACOS_AMD64_CC),$(MACOS_AMD64_CC),not set)"
+	@printf '%-14s: %s\n' "macos-arm64"   "$(if $(MACOS_ARM64_CC),$(MACOS_ARM64_CC),not set)"
+	@printf '%-14s: %s\n' "bsd-386"       "$(if $(BSD_386_CC),$(BSD_386_CC),not set)"
+	@printf '%-14s: %s\n' "bsd-amd64"     "$(if $(BSD_AMD64_CC),$(BSD_AMD64_CC),not set)"
+	@printf '%-14s: %s\n' "bsd-arm"       "$(if $(BSD_ARM_CC),$(BSD_ARM_CC),not set)"
+	@printf '%-14s: %s\n' "bsd-arm64"     "$(if $(BSD_ARM64_CC),$(BSD_ARM64_CC),not set)"
 	@printf '%-14s: %s\n' "windows-arm"   "$(if $(WINARM_CC),$(WINARM_CC),not set)"
 	@printf '%-14s: %s\n' "windows-arm64" "$(if $(WINARM64_CC),$(WINARM64_CC),not set)"
 
