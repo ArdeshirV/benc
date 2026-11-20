@@ -192,5 +192,3 @@ Makefile             cross-platform build
 tests/run_tests.sh   end-to-end test suite (make test)
 tests/data/          version 2 compatibility fixture
 ```
-filePath">
-/home/asohishn/Documents/Projects/C++/benc/README.md
