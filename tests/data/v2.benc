@@ -1,0 +1,15 @@
+-----BEGIN BENC FILE-----
+Version: 2
+KDF: PBKDF2-HMAC-SHA256+SHAKE256
+Iterations: 210000
+Cipher: ChaCha20-Cascade-512
+MAC: KMAC256
+Salt: Pfiq0WCwDv+PLWd09f6pmkNhgZOknSk6waBrRpTL4Ao=
+Nonce: lYJYyheDeDXdGw4fzFIFUA==
+Name: djItcGxhaW4udHh0
+Size: 30
+-----BEGIN BENC DATA-----
+5gvKrAGIhVdLryeMkuo7brsXSYR2nhN55QDTI1KNAj6/9zqW5SjWsLStpoXTv0J8
+FsYU43tzSlb5surItu4=
+-----END BENC DATA-----
+-----END BENC FILE-----
