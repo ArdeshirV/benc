@@ -25,6 +25,7 @@
 #   make all-platforms    build every platform whose toolchain is installed
 #   make check            show which toolchains were detected
 #   make test             run the test suite with the native build
+#   make nace-drex        optional Nace Drex client -> build/nace/nace-drex
 #   make install          install the native binary into $(PREFIX)/bin
 #   make clean            remove all build products
 #
@@ -158,16 +159,19 @@ endif
 # ------------------------------------------------------------- targets ----
 .PHONY: all native linux linux-386 linux-amd64 linux-arm linux-arm64 macos macos-amd64 macos-arm64 \
         termux bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 solaris windows windows-amd64 \
-        windows-386 windows-arm windows-arm64 windows-msvc dos all-platforms check test install \
-        clean distclean help
+        windows-386 windows-arm windows-arm64 windows-msvc dos all-platforms check test \
+        nace-drex install clean distclean help
 
 all: native
 
 # Fail with a clear message if the single source file is missing, instead of
-# a cryptic "No rule to make target".  The real file is used when present.
+# a cryptic "No rule to make target".  Only installed when benc.c really is
+# absent, so a forced build (-B) never replaces the real recipe.
+ifeq ($(wildcard $(SRC)),)
 $(SRC):
 	@echo "error: $(SRC) is missing; restore the benc source before building" >&2
 	@exit 1
+endif
 
 native: $(APP)$(EXE)
 
@@ -525,6 +529,21 @@ check:
 	@printf '%-14s: %s\n' "windows-arm"   "$(if $(WINARM_CC),$(WINARM_CC),not set)"
 	@printf '%-14s: %s\n' "windows-arm64" "$(if $(WINARM64_CC),$(WINARM64_CC),not set)"
 
+# ---------------------------------------------------------------- nace ----
+# Optional decision-routing helper.  Unlike benc it needs OpenSSL and a POSIX
+# socket API, so it has its own binary and is never part of `make all` or the
+# platform targets.
+NACE_DREX       := $(BUILD)/nace/nace-drex
+NACE_DREX_SRC   := nace_drex.c nace_drex_cli.c
+NACE_DREX_HDR   := nace_drex.h
+NACE_DREX_LDLIBS ?= -lssl -lcrypto
+
+nace-drex: $(NACE_DREX)
+
+$(NACE_DREX): $(NACE_DREX_SRC) $(NACE_DREX_HDR)
+	@mkdir -p $(BUILD)/nace
+	$(CC) $(CFLAGS) $(WARN) -o $@ $(NACE_DREX_SRC) $(NACE_DREX_LDLIBS)
+
 # --------------------------------------------------------------- tests ----
 test: native
 	sh tests/run_tests.sh ./$(APP)$(EXE)
@@ -542,4 +561,4 @@ clean:
 distclean: clean
 
 help:
-	@sed -n '2,20p' Makefile | sed 's|^# \{0,1\}||; s|\$$(PREFIX)|$(PREFIX)|g'
+	@sed -n '2,31p' Makefile | sed 's|^# \{0,1\}||; s|\$$(PREFIX)|$(PREFIX)|g'

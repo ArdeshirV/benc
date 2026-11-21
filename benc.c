@@ -1103,26 +1103,24 @@ static int b64_dec_finish(b64_dec *d)
 /* decode a short string (header fields) */
 static int b64_decode(const char *s, uint8_t *out, size_t cap, size_t *outlen)
 {
-    uint8_t tmp[4 * BENC_MAX_NAME];
-    size_t n = 0;
     b64_dec *d;
+    size_t len = strlen(s);
     int r = -1;
 
-    if (strlen(s) > sizeof tmp)
+    /* the decoder buffers into obuf, so a short field must fit there whole */
+    if (len > 4 * BENC_MAX_NAME)
         return -1;
     d = (b64_dec *)calloc(1, sizeof *d);
     if (!d)
         return -1;
     /* decode into d->obuf only; no sink needed for short input */
-    if (b64_dec_feed(d, (const uint8_t *)s, strlen(s)) == 0 &&
+    if (b64_dec_feed(d, (const uint8_t *)s, len) == 0 &&
         d->n == 0 && d->pad != 1 && d->olen <= cap) {
         memcpy(out, d->obuf, d->olen);
-        n = d->olen;
-        *outlen = n;
+        *outlen = d->olen;
         r = 0;
     }
     free(d);
-    (void)tmp;
     return r;
 }
 
@@ -1696,6 +1694,7 @@ static char *xstrdup_cat(const char *a, size_t alen, const char *b)
     return p;
 }
 
+#if defined(BENC_DOS)
 /* DOS file names are 8.3: replace the extension instead of appending */
 static size_t stem_len(const char *path)
 {
@@ -1703,6 +1702,7 @@ static size_t stem_len(const char *path)
 
     return dot && dot != b ? (size_t)(dot - path) : strlen(path);
 }
+#endif
 
 static char *default_encrypt_output(const char *in)
 {
@@ -1959,18 +1959,25 @@ done:
     return (int)n;
 }
 
-static void read_plain(char *buf, size_t cap, int *r)
+/* Reads the first line of fp into buf, without its line ending.
+ * returns the length, 0 for an empty line, -1 on EOF/error, -2 if the line
+ * does not fit (the rest of it is discarded). */
+static int read_password_line(FILE *fp, char *buf, size_t cap)
 {
     size_t n;
 
-    if (!fgets(buf, (int)cap, stdin)) {
-        *r = -1;
-        return;
-    }
+    if (!fgets(buf, (int)cap, fp))
+        return -1;
     n = strlen(buf);
+    if (n + 1 >= cap && buf[n - 1] != '\n') {
+        int ch;
+        while ((ch = fgetc(fp)) != EOF && ch != '\n')
+            ;
+        return -2;
+    }
     while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
         buf[--n] = '\0';
-    *r = n + 1 >= cap ? -2 : (int)n;
+    return (int)n;
 }
 
 static int prompt_secret(const char *prompt, char *buf, size_t cap)
@@ -2005,22 +2012,21 @@ static int get_password(const opts *o, char *buf, size_t cap, int confirm,
     }
     if (o->password_file) {
         FILE *fp = fopen(o->password_file, "rb");
-        int r = 0;
+        int r;
 
         if (!fp)
             return fail_errno("cannot open password file", o->password_file);
-        if (!fgets(buf, (int)cap, fp)) {
-            fclose(fp);
-            return fail("password file is empty");
-        }
+        r = read_password_line(fp, buf, cap);
         fclose(fp);
-        read_plain(buf, cap, &r);          /* placeholder, replaced below */
-        (void)r;
-        return 1;
+        if (r == -2)
+            return fail("password too long");
+        if (r <= 0)
+            return fail("password file is empty");
+        return 0;
     }
     if (!benc_isatty(0)) {
-        int r;
-        read_plain(buf, cap, &r);
+        int r = read_password_line(stdin, buf, cap);
+
         if (r == -1)
             return fail("no password supplied");
         if (r == -2)
@@ -2039,7 +2045,7 @@ static int get_password(const opts *o, char *buf, size_t cap, int confirm,
         for (tries = 0; tries < BENC_MAX_TRIES; tries++) {
             snprintf(prompt, sizeof prompt, "%sPassword: ", lead);
             r = prompt_secret(prompt, buf, cap);
-            if (r < 0 || (r > 0 && 0))
+            if (r < 0)
                 return 1;
             if (r == 1) {
                 lead = "Empty password. ";
@@ -2107,6 +2113,49 @@ static int check_output(const char *in_path, const char *out_path, const opts *o
         return fail("output file '%s' already exists (use -f to overwrite)",
                     out_path);
     return 0;
+}
+
+/* Flush, close and move a finished output file into place.  On success the
+ * caller's FILE pointer is cleared and the temporary path is forgotten; on
+ * failure the message is already printed and the temporary file is left for
+ * the caller's cleanup. */
+static int commit_output(FILE **outp, char *tmp, int direct,
+                         const char *out_path)
+{
+    FILE *out = *outp;
+
+    if (fflush(out) != 0) {
+        fail("cannot write output");
+        return -1;
+    }
+    if (fclose(out) != 0) {
+        *outp = NULL;
+        fail("cannot close output");
+        return -1;
+    }
+    *outp = NULL;
+    if (!direct && rename_over(tmp, out_path) != 0) {
+        fail_errno("cannot create output", out_path);
+        return -1;
+    }
+    set_tmp(NULL);
+    return 0;
+}
+
+/* final status line for a finished job (or a cleared line with --quiet) */
+static void report_result(const opts *o, const char *verb,
+                          const char *in_path, const char *out_path,
+                          uint64_t bytes, unsigned long t0, const char *note)
+{
+    char sz[24], tm[24];
+
+    if (o->quiet) {
+        ui_clear();
+        return;
+    }
+    fmt_size(bytes, sz);
+    fmt_secs(now_ms() - t0, tm);
+    ui_final("%s %s -> %s  (%s, %s)%s", verb, in_path, out_path, sz, tm, note);
 }
 
 static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
@@ -2205,31 +2254,14 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
         goto done;
     }
     w_ok = 0;
-    if (fprintf(out, "%s\n%s\n", BENC_END_DATA, BENC_END_FILE) < 0 ||
-        fflush(out) != 0) {
+    if (fprintf(out, "%s\n%s\n", BENC_END_DATA, BENC_END_FILE) < 0) {
         fail("cannot write output");
         goto done;
     }
-    if (fclose(out) != 0) {
-        out = NULL;
-        fail("cannot close output");
+    if (commit_output(&out, tmp, direct, out_path))
         goto done;
-    }
-    out = NULL;
-    if (!direct && rename_over(tmp, out_path) != 0) {
-        fail_errno("cannot create output", out_path);
-        goto done;
-    }
-    set_tmp(NULL);
-    if (!o->quiet) {
-        char sz[24], tm[24];
-        fmt_size(done, sz);
-        fmt_secs(now_ms() - t0, tm);
-        ui_final("Encrypted %s -> %s  (%s, %s)%s", in_path, out_path, sz, tm,
-                 benc_random_weak ? "  [weak random source]" : "");
-    } else {
-        ui_clear();
-    }
+    report_result(o, "Encrypted", in_path, out_path, done, t0,
+                  benc_random_weak ? "  [weak random source]" : "");
     rc = RC_OK;
 
 done:
@@ -2372,29 +2404,9 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         fail("file is truncated");
         goto done;
     }
-    if (fflush(out) != 0) {
-        fail("cannot write output");
+    if (commit_output(&out, tmp, direct, out_path))
         goto done;
-    }
-    if (fclose(out) != 0) {
-        out = NULL;
-        fail("cannot close output");
-        goto done;
-    }
-    out = NULL;
-    if (!direct && rename_over(tmp, out_path) != 0) {
-        fail_errno("cannot create output", out_path);
-        goto done;
-    }
-    set_tmp(NULL);
-    if (!o->quiet) {
-        char sz[24], tm[24];
-        fmt_size(cipher_len, sz);
-        fmt_secs(now_ms() - t0, tm);
-        ui_final("Decrypted %s -> %s  (%s, %s)", in_path, out_path, sz, tm);
-    } else {
-        ui_clear();
-    }
+    report_result(o, "Decrypted", in_path, out_path, cipher_len, t0, "");
     rc = RC_OK;
 
 done:
