@@ -118,39 +118,6 @@ prefer the prompt, a pipe, or `--password-file`.
 `-i` only affects newly created containers. Decryption always uses the
 iteration count stored in the file.
 
-## Decision routing with Nace Drex (optional)
-
-`nace-drex` is a companion tool, not part of `benc`: it sends one case state and
-typed questions to the [Nace Drex](https://console.nace.ai/docs/drex/quickstart)
-decision API (`POST /v1/systemone`, model `drex-latest`) and routes the case on
-the calibrated probability of every option. `benc` itself never links a network
-or crypto library; this tool needs OpenSSL and a POSIX socket API.
-
-```
-make nace-drex
-export NACE_API_KEY="nace_sk_..."      # from console.nace.ai -> API Keys
-
-./build/nace/nace-drex --state "Help! My payouts have been failing for 3 days." \
-    --noul is_urgent="Does this convey urgency?" \
-    --choice team="Which team should handle this?" \
-    --option payments="Payouts, charges, or refunds" \
-    --option support="General questions and how-to"
-```
-
-```
-drex-latest  request req_...  6.8 ms  tokens 63/86
-is_urgent        noul    p(yes)=0.8401 p(no)=0.1599  -> yes
-team             choice  payments=0.9227 support=0.0296  -> payments
-```
-
-`--threshold P` (default 0.5) is the probability an option needs before it is
-acted on; an answer that clears nothing is printed as undecided and the tool
-exits 2, so a script can send that case to a human instead. `--score ID=TEXT`
-with `--level` asks an ordered question, `--state-file` or stdin replaces
-`--state`, `--model` picks another model, and `--json` prints the raw response.
-The key is only ever read from `NACE_API_KEY` (see `.env.example`), and exit
-codes are 0 decided, 2 below the threshold, 1 usage, network or API error.
-
 ## Container format
 
 ```
@@ -221,8 +188,6 @@ tag  = HMAC-SHA256(key, canonical_header || ciphertext)
 
 ```
 benc.c               the whole program
-nace_drex.c, .h      optional Nace Drex decision client (OpenSSL + POSIX)
-nace_drex_cli.c      the nace-drex command line front end
 Makefile             cross-platform build
 tests/run_tests.sh   end-to-end test suite (make test)
 tests/data/          version 2 compatibility fixture
