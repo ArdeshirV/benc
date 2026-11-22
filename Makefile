@@ -43,7 +43,7 @@
 # ---------------------------------------------------------------------------
 
 APP     := benc
-SRC     := benc.c
+SRC     := benc.c benc_codecs.c benc_tar.c
 BUILD   := build
 
 CC       ?= cc
@@ -176,7 +176,7 @@ endif
 native: $(APP)$(EXE)
 
 $(APP)$(EXE): $(SRC)
-	$(CC) $(CFLAGS) $(WARN) -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -DBENC_POSIX -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
 
 # --------------------------------------------------------------- linux ----
 linux:

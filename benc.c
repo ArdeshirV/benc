@@ -4,11 +4,17 @@
  *   benc encrypt file.bin        -> file.bin.benc   (plain ASCII text)
  *   benc decrypt file.bin.benc   -> file.bin
  *
- * Self contained C99, no external libraries.  Builds with gcc/clang
+ * Self contained C99 encryption core; compression is native in this file
+ * (LZMA2 and Zstd, no external library or tool).  Builds with gcc/clang
  * (Linux, macOS, Termux, *BSD), MinGW or MSVC (Windows) and DJGPP /
  * ia16-gcc (DOS; use -mcmodel=medium, the tiny model is too small).
  *
- * Construction (container format 1, unchanged from earlier releases)
+ * Construction (container format 4; format 1 files still decrypt).  Versions
+ * 2 and 3 belong to a different container lineage (SHAKE256 KDF,
+ * ChaCha20-Cascade-512, KMAC256, encrypted names) and are rejected.
+ *   preprocess: a directory is packed with tar, then the payload is
+ *               compressed (lzma2 by default, zstd, or none) before it is
+ *               encrypted
  *   keys      : PBKDF2-HMAC-SHA256(password, salt, iterations) -> 64 bytes
  *               (first 32 = cipher key, second 32 = MAC key)
  *   encryption: ChaCha20 (64 bit nonce, 64 bit block counter)
@@ -43,12 +49,23 @@
 #include <errno.h>
 #include <time.h>
 #include <signal.h>
+#include "benc_codecs.h"
+#include "benc_tar.h"
+#if defined(_WIN32)
+#  include <windows.h>
+#elif !defined(__DJGPP__) && !defined(__MSDOS__) && !defined(_DOS)
+#  include <dlfcn.h>
+#endif
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
 #  include <conio.h>
 #  include <io.h>
+#  include <fcntl.h>
+#  include <process.h>
+#  include <sys/stat.h>
+#  include <direct.h>
 #  define BENC_WINDOWS 1
 #  define benc_isatty(fd) _isatty(fd)
 #elif defined(__DJGPP__) || defined(__MSDOS__) || defined(_DOS)
@@ -63,6 +80,9 @@
 #  include <sys/stat.h>
 #  include <sys/time.h>
 #  include <sys/ioctl.h>
+#  include <sys/wait.h>
+#  include <fcntl.h>
+#  include <dirent.h>
 #  define BENC_POSIX 1
 #  define benc_isatty(fd) isatty(fd)
 #endif
@@ -72,8 +92,9 @@
 /* ------------------------------------------------------------------ */
 
 #define BENC_NAME         "benc"
-#define BENC_VERSION      "1.1.0"
-#define BENC_FMT_VERSION  1u
+#define BENC_VERSION      "1.2.0"
+#define BENC_FMT_VERSION  4u          /* what new containers are written as */
+#define BENC_FMT_LEGACY   1u          /* oldest container still readable    */
 
 #define BENC_SALT_LEN     16
 #define BENC_NONCE_LEN    8
@@ -97,11 +118,13 @@
 #  define BENC_CHUNK      (BENC_B64_BLOCK * 128)       /* 6 KiB           */
 #  define BENC_RBUF       4096
 #  define BENC_OBUF       1536
+#  define BENC_COPY_BUF  1024
 #  define BENC_MAX_PASSWORD 256
 #else
 #  define BENC_CHUNK      (BENC_B64_BLOCK * 1024)      /* 48 KiB          */
 #  define BENC_RBUF       65536
 #  define BENC_OBUF       16384
+#  define BENC_COPY_BUF  65536
 #  define BENC_MAX_PASSWORD 1024
 #endif
 
@@ -116,6 +139,41 @@
 #define BENC_KDF_NAME     "PBKDF2-HMAC-SHA256"
 #define BENC_CIPHER_NAME  "ChaCha20"
 #define BENC_MAC_NAME     "HMAC-SHA256"
+#define BENC_MAX_THREADS  1024
+
+/* Compression identifiers.  The order is part of the container: only the
+ * name is written, but these values are used everywhere internally. */
+enum {
+    COMP_NONE = 0, COMP_LZMA2, COMP_ZSTD, COMP_COUNT
+};
+
+typedef struct {
+    const char *name;      /* name stored in the container header */
+    const char *alias;     /* second accepted command line spelling */
+    int min_level, max_level, def_level;
+    int threaded;          /* 1 when the backend can use extra threads */
+} comp_spec;
+
+static const comp_spec comp_specs[COMP_COUNT] = {
+    { "none",   NULL,   0,  0,  0, 0 },
+    { "lzma2",  "lzma", 0,  9,  6, 1 },
+    { "zstd",   NULL,   1, 19,  3, 1 }
+};
+
+static int ci_equal(const char *a, const char *b);
+
+static int comp_lookup(const char *name);
+
+static int comp_lookup(const char *name)
+{
+    int i;
+
+    for (i = 0; i < COMP_COUNT; i++)
+        if (ci_equal(name, comp_specs[i].name) ||
+            (comp_specs[i].alias && ci_equal(name, comp_specs[i].alias)))
+            return i;
+    return -1;
+}
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
@@ -1244,18 +1302,23 @@ static int benc_random(uint8_t *buf, size_t len)
 /* ------------------------------------------------------------------ */
 
 typedef struct {
+    unsigned version;
     unsigned long iterations;
     uint8_t  salt[BENC_SALT_LEN];
     uint8_t  nonce[BENC_NONCE_LEN];
     char     name[BENC_MAX_NAME + 1];
     size_t   name_len;
-    uint64_t size;
+    uint64_t size;          /* bytes fed to the cipher (after compression) */
     int      size_known;
+    int      comp;          /* COMP_* */
+    int      level;
+    int      threads;
+    int      archive;       /* payload is a tar archive of a directory */
 } benc_header;
 
 typedef struct {
     char salt[32], nonce[16], name[4 * ((BENC_MAX_NAME + 2) / 3) + 8];
-    char iters[24], size[24];
+    char iters[24], size[24], level[16], threads[16], input[8];
 } hdr_text;
 
 static int header_encode(const benc_header *h, hdr_text *t)
@@ -1266,6 +1329,9 @@ static int header_encode(const benc_header *h, hdr_text *t)
                           sizeof t->name))
         return -1;
     u64_to_dec((uint64_t)h->iterations, t->iters);
+    u64_to_dec((uint64_t)(h->level < 0 ? 0 : h->level), t->level);
+    u64_to_dec((uint64_t)(h->threads < 0 ? 0 : h->threads), t->threads);
+    strcpy(t->input, h->archive ? "tar" : "file");
     if (h->size_known)
         u64_to_dec(h->size, t->size);
     else
@@ -1281,8 +1347,16 @@ static int header_canonical(const benc_header *h, char *out, size_t cap)
 
     if (header_encode(h, &t))
         return -1;
-    r = snprintf(out, cap, "benc|%u|%s|%s|%s|%s|%s|%s\n", BENC_FMT_VERSION,
-                 BENC_KDF_NAME, t.iters, t.salt, t.nonce, t.name, t.size);
+    if (h->version <= BENC_FMT_LEGACY)
+        r = snprintf(out, cap, "benc|%u|%s|%s|%s|%s|%s|%s\n",
+                     BENC_FMT_LEGACY, BENC_KDF_NAME, t.iters, t.salt, t.nonce,
+                     t.name, t.size);
+    else
+        r = snprintf(out, cap,
+                     "benc|%u|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n",
+                     h->version, BENC_KDF_NAME, t.iters, BENC_CIPHER_NAME,
+                     BENC_MAC_NAME, comp_specs[h->comp].name, t.level,
+                     t.threads, t.input, t.salt, t.nonce, t.name, t.size);
     return (r < 0 || (size_t)r >= cap) ? -1 : 0;
 }
 
@@ -1292,12 +1366,36 @@ static int write_header(FILE *fp, const benc_header *h)
 
     if (header_encode(h, &t))
         return -1;
+    if (h->version <= BENC_FMT_LEGACY)
+        return fprintf(fp,
+                       "%s\nVersion: %u\nKDF: %s\nIterations: %s\nCipher: %s\n"
+                       "MAC: %s\nSalt: %s\nNonce: %s\nName: %s\nSize: %s\n%s\n",
+                       BENC_BEGIN_FILE, BENC_FMT_LEGACY, BENC_KDF_NAME, t.iters,
+                       BENC_CIPHER_NAME, BENC_MAC_NAME, t.salt, t.nonce, t.name,
+                       t.size, BENC_BEGIN_DATA) < 0 ? -1 : 0;
     return fprintf(fp,
                    "%s\nVersion: %u\nKDF: %s\nIterations: %s\nCipher: %s\n"
-                   "MAC: %s\nSalt: %s\nNonce: %s\nName: %s\nSize: %s\n%s\n",
-                   BENC_BEGIN_FILE, BENC_FMT_VERSION, BENC_KDF_NAME, t.iters,
-                   BENC_CIPHER_NAME, BENC_MAC_NAME, t.salt, t.nonce, t.name,
+                   "MAC: %s\nCompression: %s\nCompression-Level: %s\n"
+                   "Compression-Threads: %s\nInput: %s\nSalt: %s\nNonce: %s\n"
+                   "Name: %s\nSize: %s\n%s\n",
+                   BENC_BEGIN_FILE, h->version, BENC_KDF_NAME, t.iters,
+                   BENC_CIPHER_NAME, BENC_MAC_NAME, comp_specs[h->comp].name,
+                   t.level, t.threads, t.input, t.salt, t.nonce, t.name,
                    t.size, BENC_BEGIN_DATA) < 0 ? -1 : 0;
+}
+
+/* Base64 is case sensitive and its last character may carry unused bits.
+ * Re-encoding proves the text is the only spelling of those bytes, so no
+ * header byte can change without changing the authenticated header. */
+static int b64_is_canonical(const char *text, const uint8_t *raw, size_t n)
+{
+    char buf[4 * ((BENC_MAX_NAME + 2) / 3) + 8];
+
+    if (n > BENC_MAX_NAME)
+        return 0;
+    if (b64_encode_string(raw, n, buf, sizeof buf))
+        return 0;
+    return strcmp(buf, text) == 0;
 }
 
 /* 1 = line read, 0 = clean EOF, -2 = line too long */
@@ -1325,8 +1423,11 @@ enum {
     SEEN_VERSION = 1u << 0, SEEN_KDF = 1u << 1, SEEN_ITER = 1u << 2,
     SEEN_CIPHER = 1u << 3, SEEN_MAC = 1u << 4, SEEN_SALT = 1u << 5,
     SEEN_NONCE = 1u << 6, SEEN_NAME = 1u << 7, SEEN_SIZE = 1u << 8,
+    SEEN_COMP = 1u << 9, SEEN_LEVEL = 1u << 10, SEEN_THREADS = 1u << 11,
+    SEEN_INPUT = 1u << 12,
     SEEN_REQUIRED = SEEN_VERSION | SEEN_KDF | SEEN_ITER | SEEN_CIPHER |
-                    SEEN_MAC | SEEN_SALT | SEEN_NONCE
+                    SEEN_MAC | SEEN_SALT | SEEN_NONCE,
+    SEEN_V4_REQUIRED = SEEN_COMP | SEEN_LEVEL | SEEN_THREADS | SEEN_INPUT
 };
 
 /* on success the stream is positioned at the first line of the body */
@@ -1369,6 +1470,10 @@ static int parse_header(FILE *fp, benc_header *h)
         else if (strcmp(key, "Nonce") == 0)      bit = SEEN_NONCE;
         else if (strcmp(key, "Name") == 0)       bit = SEEN_NAME;
         else if (strcmp(key, "Size") == 0)       bit = SEEN_SIZE;
+        else if (strcmp(key, "Compression") == 0)         bit = SEEN_COMP;
+        else if (strcmp(key, "Compression-Level") == 0)   bit = SEEN_LEVEL;
+        else if (strcmp(key, "Compression-Threads") == 0) bit = SEEN_THREADS;
+        else if (strcmp(key, "Input") == 0)               bit = SEEN_INPUT;
         else return fail("unknown header field");
         if (seen & bit)
             return fail("duplicate header field");
@@ -1376,8 +1481,10 @@ static int parse_header(FILE *fp, benc_header *h)
 
         switch (bit) {
         case SEEN_VERSION:
-            if (dec_to_u64(val, &v) || v != BENC_FMT_VERSION)
+            if (dec_to_u64(val, &v) || v < BENC_FMT_LEGACY ||
+                v > BENC_FMT_VERSION)
                 return fail("unsupported container version");
+            h->version = (unsigned)v;
             break;
         case SEEN_KDF:
             if (strcmp(val, BENC_KDF_NAME) != 0)
@@ -1398,25 +1505,50 @@ static int parse_header(FILE *fp, benc_header *h)
             break;
         case SEEN_SALT: {
             size_t n;
-            if (b64_decode(val, h->salt, sizeof h->salt, &n) || n != BENC_SALT_LEN)
+            if (b64_decode(val, h->salt, sizeof h->salt, &n) ||
+                n != BENC_SALT_LEN || !b64_is_canonical(val, h->salt, n))
                 return fail("invalid salt");
             break;
         }
         case SEEN_NONCE: {
             size_t n;
             if (b64_decode(val, h->nonce, sizeof h->nonce, &n) ||
-                n != BENC_NONCE_LEN)
+                n != BENC_NONCE_LEN || !b64_is_canonical(val, h->nonce, n))
                 return fail("invalid nonce");
             break;
         }
         case SEEN_NAME: {
             size_t n;
-            if (b64_decode(val, (uint8_t *)h->name, BENC_MAX_NAME, &n))
+            if (b64_decode(val, (uint8_t *)h->name, BENC_MAX_NAME, &n) ||
+                !b64_is_canonical(val, (const uint8_t *)h->name, n))
                 return fail("invalid name field");
             h->name[n] = '\0';
             h->name_len = n;
             break;
         }
+        case SEEN_COMP: {
+            int id = comp_lookup(val);
+            if (id < 0)
+                return fail("unsupported compression method '%s'", val);
+            h->comp = id;
+            break;
+        }
+        case SEEN_LEVEL:
+            if (dec_to_u64(val, &v) || v > 22)
+                return fail("invalid compression level");
+            h->level = (int)v;
+            break;
+        case SEEN_THREADS:
+            if (dec_to_u64(val, &v) || v > BENC_MAX_THREADS)
+                return fail("invalid thread count");
+            h->threads = (int)v;
+            break;
+        case SEEN_INPUT:
+            if (strcmp(val, "tar") == 0)
+                h->archive = 1;
+            else if (strcmp(val, "file") != 0)
+                return fail("unsupported input kind");
+            break;
         case SEEN_SIZE:
             if (strcmp(val, "-") == 0) {
                 h->size_known = 0;
@@ -1431,6 +1563,15 @@ static int parse_header(FILE *fp, benc_header *h)
     }
     if ((seen & SEEN_REQUIRED) != SEEN_REQUIRED)
         return fail("incomplete header");
+    if (h->version > BENC_FMT_LEGACY &&
+        (seen & SEEN_V4_REQUIRED) != SEEN_V4_REQUIRED)
+        return fail("incomplete header");
+    if (h->version <= BENC_FMT_LEGACY) {
+        h->comp = COMP_NONE;
+        h->level = 0;
+        h->threads = 0;
+        h->archive = 0;
+    }
     return 0;
 }
 
@@ -1647,6 +1788,20 @@ static int is_regular_file(const char *path)
 #endif
 }
 
+static int is_directory(const char *path)
+{
+#if defined(BENC_WINDOWS)
+    DWORD a = GetFileAttributesA(path);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#elif defined(BENC_POSIX)
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#else
+    (void)path;
+    return 0;
+#endif
+}
+
 static int same_file(const char *a, const char *b)
 {
 #if defined(BENC_POSIX)
@@ -1674,12 +1829,57 @@ static int stream_size(FILE *fp, uint64_t *size)
     return 0;
 }
 
+#if defined(BENC_POSIX)
+static int copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb");
+    FILE *out;
+    unsigned char buf[BENC_COPY_BUF];
+    size_t n;
+
+    if (!in)
+        return -1;
+    out = fopen(to, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            return -1;
+        }
+    }
+    if (ferror(in)) {
+        fclose(in);
+        fclose(out);
+        return -1;
+    }
+    if (fclose(out) != 0) {
+        fclose(in);
+        return -1;
+    }
+    fclose(in);
+    return 0;
+}
+#endif
+
 static int rename_over(const char *from, const char *to)
 {
 #if !defined(BENC_POSIX)
     remove(to);                      /* rename() cannot overwrite here */
-#endif
     return rename(from, to);
+#else
+    if (rename(from, to) == 0)
+        return 0;
+    /* staging lives in RAM (/dev/shm) but the target is on disk: copy */
+    if (copy_file(from, to) == 0) {
+        remove(from);
+        return 0;
+    }
+    return -1;
+#endif
 }
 
 static char *xstrdup_cat(const char *a, size_t alen, const char *b)
@@ -1737,30 +1937,61 @@ static char *stored_name_output(const char *in, const char *stored)
     return xstrdup_cat(in, dlen, safe);
 }
 
-static char *temp_path(const char *final)
+/* RAM-backed temporary directory: /dev/shm on POSIX, the OS temp dir on
+ * Windows/DOS.  All staged temporary files are created here so sensitive
+ * plaintext never lands on a (recoverable) disk location. */
+static const char *ram_temp_dir(void)
 {
-#if defined(BENC_DOS)
-    size_t dlen = (size_t)(base_name(final) - final);
-    char *p = (char *)malloc(dlen + 13);
-    unsigned v = (unsigned)(now_ms() ^ (unsigned long)time(NULL));
-    int i;
+#if defined(BENC_WINDOWS)
+    static char buf[512];
+    DWORD n;
 
-    if (!p)
-        return NULL;
-    for (i = 0; i < 100; i++, v += 7919u) {
-        memcpy(p, final, dlen);
-        sprintf(p + dlen, "BENC%04X.TMP", v & 0xFFFFu);
-        if (!file_exists(p))
-            return p;
-    }
-    return p;
+    n = GetTempPathA((DWORD)sizeof buf, buf);
+    if (n > 0 && (size_t)n < sizeof buf)
+        return buf;
+    return "C:\\Windows\\Temp";
+#elif defined(BENC_DOS)
+    return "/tmp";
 #else
-    return xstrdup_cat(final, strlen(final), ".part");
+    return "/dev/shm";
 #endif
 }
 
 /* interrupt handling: restore the terminal, drop the half written file */
 static char g_tmp[1024];
+
+/* temporary plaintext staging files (tar archive, compressed payload) */
+#define BENC_MAX_STAGE 2
+static char g_stage[BENC_MAX_STAGE][1024];
+
+static void stage_forget(void)
+{
+    int i;
+
+    for (i = 0; i < BENC_MAX_STAGE; i++) {
+        if (!g_stage[i][0])
+            continue;
+#if defined(BENC_POSIX)
+        unlink(g_stage[i]);
+#else
+        remove(g_stage[i]);
+#endif
+        g_stage[i][0] = '\0';
+    }
+}
+
+static void stage_remember(const char *p)
+{
+    int i;
+
+    for (i = 0; i < BENC_MAX_STAGE; i++) {
+        if (!g_stage[i][0]) {
+            if (strlen(p) < sizeof g_stage[i])
+                strcpy(g_stage[i], p);
+            return;
+        }
+    }
+}
 #if defined(BENC_POSIX)
 static struct termios g_tio;
 static volatile int g_tio_saved;
@@ -1783,6 +2014,7 @@ static void on_signal(int sig)
         remove(g_tmp);
 #endif
     }
+    stage_forget();
     if (n > 0 && n <= UI_MAXW) {
         out[p++] = '\r';
         for (i = 0; i < n; i++)
@@ -1831,7 +2063,10 @@ typedef struct {
     const char *password_file;   /* -P */
     const char *output;
     unsigned long iterations;
-    int force, use_header_name, quiet;
+    int force, use_header_name, no_name, quiet;
+    int compress;                /* COMP_* */
+    int level;                   /* -1 = the codec default */
+    long threads;                /* 0 = all cores / backend default */
 } opts;
 
 /* read one key press without echo; -1 on EOF */
@@ -2068,9 +2303,183 @@ static int get_password(const opts *o, char *buf, size_t cap, int confirm,
 }
 
 /* ------------------------------------------------------------------ */
-/* encrypt / decrypt                                                   */
+/* compression and directory archiving                                 */
 /* ------------------------------------------------------------------ */
 
+/* Directories are archived with tar.  The archive, and any ordinary input
+ * file, is then compressed before it is encrypted.  Supported compression
+ * methods are built in (lzma2/zstd/none); staged plaintext is created
+ * 0600 and removed when the job ends. */
+
+/* A private temporary file next to the output.  0600 where the platform
+ * allows it, because it holds plaintext. */
+static char *stage_path(const char *fname, const char *tag)
+{
+    const char *d = ram_temp_dir();
+    const char *b = base_name(fname);
+    size_t blen = strlen(b);
+    size_t need = strlen(d) + strlen(tag) + blen + 48;
+    char *p = (char *)malloc(need);
+    unsigned tries = 0;
+
+    if (!p)
+        return NULL;
+    for (;;) {
+        snprintf(p, need, "%s/benc-%s-%s-%u.part", d, tag, b, tries++);
+        if (!file_exists(p))
+            break;
+        if (tries > 1000) {
+            free(p);
+            return NULL;
+        }
+    }
+#if defined(BENC_POSIX)
+    {
+        int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) {
+            free(p);
+            return NULL;
+        }
+        close(fd);
+    }
+#else
+    {
+        FILE *fp = fopen(p, "wb");
+        if (!fp) {
+            free(p);
+            return NULL;
+        }
+        fclose(fp);
+    }
+#endif
+    stage_remember(p);
+    return p;
+}
+
+/* Run the in-process compression backend.  decode=0 compresses src -> dst,
+ * decode=1 decompresses.  Only the built-in methods may be selected. */
+static int run_codec(int comp, int level, int threads,
+                     const char *src, const char *dst, int decode)
+{
+    (void)level;
+    (void)threads;
+    if (comp == COMP_NONE)
+        return 0;
+    if (comp == COMP_LZMA2)
+        return decode ? benc_lzma2_decode(src, dst)
+                      : benc_lzma2_encode(src, dst, level, threads);
+    if (comp == COMP_ZSTD)
+        return decode ? benc_zstd_decode(src, dst) : benc_zstd_encode(src, dst, level, threads);
+    return fail("unsupported compression method");
+}
+
+/* Directory archiving: tar stores the directory itself, so extraction
+ * recreates it under the chosen output path. */
+static int split_dir(const char *path, char *dir, size_t dcap,
+                     char *name, size_t ncap)
+{
+    size_t n = strlen(path), cut, d;
+
+    while (n > 1 && is_sep(path[n - 1]))
+        n--;
+    cut = n;
+    while (cut > 0 && !is_sep(path[cut - 1]))
+        cut--;
+    if (n == cut || n - cut >= ncap)
+        return -1;
+    memcpy(name, path + cut, n - cut);
+    name[n - cut] = '\0';
+    d = cut;
+    while (d > 0 && is_sep(path[d - 1]))
+        d--;
+    if (d == 0) {
+        if (dcap < 2)
+            return -1;
+        strcpy(dir, cut ? "/" : ".");
+    } else {
+        if (d >= dcap)
+            return -1;
+        memcpy(dir, path, d);
+        dir[d] = '\0';
+    }
+    return 0;
+}
+
+static int make_tar(const char *dir, const char *name, const char *dst)
+{
+    return benc_tar_create(dir, name, dst);
+}
+
+static int extract_tar(const char *src, const char *dest)
+{
+    return benc_tar_extract(src, dest);
+}
+
+static int make_directory(const char *path)
+{
+    if (is_directory(path))
+        return 0;
+    if (file_exists(path))
+        return fail("'%s' exists and is not a directory", path);
+#if defined(BENC_WINDOWS)
+    if (_mkdir(path) != 0 && !is_directory(path))
+        return fail_errno("cannot create directory", path);
+#elif defined(BENC_POSIX)
+    if (mkdir(path, 0777) != 0 && !is_directory(path))
+        return fail_errno("cannot create directory", path);
+#else
+    return fail("cannot create directory '%s' on this platform", path);
+#endif
+    return 0;
+}
+
+/* Recursively copy a directory tree (src must be a directory).  Used to move
+ * extracted archive contents out of the RAM staging area onto the final
+ * (disk) destination without leaking plaintext to disk in between. */
+static int copy_tree(const char *src, const char *dst)
+{
+#if defined(BENC_POSIX)
+    DIR *d = opendir(src);
+    struct dirent *e;
+    struct stat st;
+    char sp[4096], dp[4096];
+
+    if (!d)
+        return -1;
+    if (mkdir(dst, 0777) != 0 && errno != EEXIST)
+        return -1;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        snprintf(sp, sizeof sp, "%s/%s", src, e->d_name);
+        snprintf(dp, sizeof dp, "%s/%s", dst, e->d_name);
+        if (stat(sp, &st) != 0) {
+            closedir(d);
+            return -1;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (copy_tree(sp, dp) != 0) {
+                closedir(d);
+                return -1;
+            }
+        } else {
+            if (copy_file(sp, dp) != 0) {
+                closedir(d);
+                return -1;
+            }
+        }
+    }
+    closedir(d);
+    return 0;
+#else
+    (void)src; (void)dst;
+    return -1;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
+/* encrypt / decrypt                                                   */
+/* ------------------------------------------------------------------ */
 enum { RC_OK = 0, RC_ERR = 1, RC_AUTH = 2 };
 
 static void derive_keys(const char *pw, const benc_header *h,
@@ -2094,7 +2503,7 @@ static FILE *open_output(const char *out_path, char **tmp, int *direct)
     *tmp = NULL;
     if (*direct)
         return fopen(out_path, "wb");
-    *tmp = temp_path(out_path);
+    *tmp = stage_path(out_path, "out");
     if (!*tmp) {
         errno = ENOMEM;
         return NULL;
@@ -2158,10 +2567,72 @@ static void report_result(const opts *o, const char *verb,
     ui_final("%s %s -> %s  (%s, %s)%s", verb, in_path, out_path, sz, tm, note);
 }
 
+static int stage_payload(const char *in_path, const char *out_path,
+                         int comp, int level, int threads,
+                         char *namebuf, size_t ncap, char *dirbuf, size_t dcap,
+                         char **staged, const char **src, int *archive)
+{
+    *archive = 0;
+    if (is_directory(in_path)) {
+        if (split_dir(in_path, dirbuf, dcap, namebuf, ncap)) {
+            fail("cannot use '%s' as input", in_path);
+            return -1;
+        }
+        staged[0] = stage_path(out_path, "tar");
+        if (!staged[0]) {
+            fail("cannot create a temporary file next to '%s'", out_path);
+            return -1;
+        }
+        if (ui_live)
+            ui_draw("Archiving directory");
+        int mrc = make_tar(dirbuf, namebuf, staged[0]);
+        if (mrc) {
+            remove(staged[0]);
+            free(staged[0]);
+            staged[0] = NULL;
+            return -1;
+        }
+        *src = staged[0];
+        *archive = 1;
+    } else {
+        *src = in_path;
+    }
+    if (comp != COMP_NONE) {
+        staged[1] = stage_path(out_path, "cmp");
+        if (!staged[1]) {
+            if (*archive) {
+                remove(*src);
+                free((void *)*src);
+                staged[0] = NULL;
+            }
+            fail("cannot create a temporary file next to '%s'", out_path);
+            return -1;
+        }
+        if (ui_live)
+            ui_draw("Compressing");
+        if (run_codec(comp, level, threads, *src, staged[1], 0)) {
+            remove(staged[1]);
+            free(staged[1]);
+            staged[1] = NULL;
+            if (*archive) {
+                remove(*src);
+                free((void *)*src);
+                staged[0] = NULL;
+            }
+            return -1;
+        }
+        *src = staged[1];
+    }
+    return 0;
+}
+
 static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
 {
     FILE *in = NULL, *out = NULL;
     char *tmp = NULL;
+    char *staged[2] = { NULL, NULL };
+    const char *src = in_path, *name;
+    char dirbuf[1024], namebuf[512];
     benc_header h;
     uint8_t enc_key[BENC_KEY_LEN], mac_key[BENC_KEY_LEN], tag[BENC_TAG_LEN];
     char pw[BENC_MAX_PASSWORD + 1], canon[2048];
@@ -2172,27 +2643,60 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     progress pg;
     uint64_t done = 0;
     unsigned long t0 = now_ms();
-    int rc = RC_ERR, direct = 0, inter, w_ok = 0;
+    int rc = RC_ERR, direct = 0, inter, w_ok = 0, archive = 0;
+    int comp = o->compress, level, threads;
     size_t n;
 
     memset(&h, 0, sizeof h);
     memset(pw, 0, sizeof pw);
     memset(&cc, 0, sizeof cc);
+    if (comp < 0 || comp >= COMP_COUNT)
+        comp = COMP_NONE;
     if (check_output(in_path, out_path, o))
         return RC_ERR;
+    level = o->level >= 0 ? o->level : comp_specs[comp].def_level;
+    threads = o->threads > BENC_MAX_THREADS ? BENC_MAX_THREADS
+                                            : (int)o->threads;
+    if (threads < 0)
+        threads = 0;
+    if (comp_specs[comp].max_level &&
+        (level < comp_specs[comp].min_level ||
+         level > comp_specs[comp].max_level))
+        return fail("%s compression levels are %d..%d", comp_specs[comp].name,
+                    comp_specs[comp].min_level, comp_specs[comp].max_level);
     if (get_password(o, pw, sizeof pw, 1, "", &inter))
         return RC_ERR;
 
-    in = fopen(in_path, "rb");
+    name = base_name(in_path);
+    {
+        int _sp_rc = stage_payload(in_path, out_path, comp, level, threads, namebuf,
+                      sizeof namebuf, dirbuf, sizeof dirbuf, staged, &src,
+                      &archive);
+        if (_sp_rc) goto done;
+    }
+
+    if (archive)
+        name = namebuf;
+
+    in = fopen(src, "rb");
     if (!in) {
-        fail_errno("cannot open input", in_path);
+        fail_errno("cannot open input", src);
         goto done;
     }
+    h.version = BENC_FMT_VERSION;
+    h.comp = comp;
+    h.level = level;
+    h.threads = threads;
+    h.archive = archive;
     h.iterations = o->iterations;
-    h.name_len = strlen(base_name(in_path));
-    if (h.name_len > BENC_MAX_NAME)
-        h.name_len = BENC_MAX_NAME;
-    memcpy(h.name, base_name(in_path), h.name_len);
+    if (o->no_name) {
+        h.name_len = 0;
+    } else {
+        h.name_len = strlen(name);
+        if (h.name_len > BENC_MAX_NAME)
+            h.name_len = BENC_MAX_NAME;
+        memcpy(h.name, name, h.name_len);
+    }
     h.size_known = (stream_size(in, &h.size) == 0);
 
     if (benc_random(h.salt, sizeof h.salt) || benc_random(h.nonce, sizeof h.nonce)) {
@@ -2286,6 +2790,16 @@ done:
         set_tmp(NULL);
     }
     free(tmp);
+    {
+        int i;
+        for (i = 0; i < 2; i++) {
+            if (staged[i]) {
+                remove(staged[i]);
+                free(staged[i]);
+            }
+        }
+    }
+    stage_forget();
     return rc;
 }
 
@@ -2321,10 +2835,73 @@ static int verify_pass(FILE *in, const benc_header *h, const char *canon,
     return RC_OK;
 }
 
+static int decrypt_unpack_archive(const char *tar, const char *in_path,
+                                  const char *out_path, const benc_header *h,
+                                  const opts *o, unsigned long t0,
+                                  uint64_t cipher_len)
+{
+    char *xdir = NULL;
+    char *childp = NULL;
+    char child[BENC_MAX_NAME + 2];
+    size_t clen;
+
+    xdir = (char *)malloc(strlen(ram_temp_dir()) + 64);
+    if (!xdir) {
+        fail("out of memory");
+        return -1;
+    }
+    snprintf(xdir, strlen(ram_temp_dir()) + 64, "%s/benc-dir-%u",
+             ram_temp_dir(), (unsigned)now_ms());
+    if (make_directory(xdir))
+        goto out;
+    if (extract_tar(tar, xdir))
+        goto out;
+    clen = h->name_len;
+    if (clen > BENC_MAX_NAME)
+        clen = BENC_MAX_NAME;
+    if (clen > (int)sizeof child - 1)
+        clen = (int)sizeof child - 1;
+    memcpy(child, h->name, clen);
+    child[clen] = '\0';
+    childp = (char *)malloc(strlen(xdir) + clen + 2);
+    if (!childp) {
+        fail("out of memory");
+        goto out;
+    }
+    sprintf(childp, "%s/%s", xdir, child);
+    if (copy_tree(childp, out_path) != 0) {
+        free(childp);
+        free(xdir);
+        fail_errno("cannot create output", out_path);
+        return -1;
+    }
+    free(childp);
+#if defined(BENC_POSIX)
+    {
+        char rmcmd[8192];
+        int r;
+        snprintf(rmcmd, sizeof rmcmd, "rm -rf '%s'", xdir);
+        r = system(rmcmd);
+        (void)r;
+    }
+#elif defined(BENC_WINDOWS)
+    _rmdir(xdir);
+#else
+    remove(xdir);
+#endif
+    free(xdir);
+    report_result(o, "Extracted", in_path, out_path, cipher_len, t0, "");
+    return 0;
+
+out:
+    free(xdir);
+    return -1;
+}
+
 static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
 {
     FILE *in = NULL, *out = NULL;
-    char *tmp = NULL;
+    char *tmp = NULL, *mid = NULL, *unz = NULL;
     benc_header h;
     uint8_t enc_key[BENC_KEY_LEN], mac_key[BENC_KEY_LEN];
     char pw[BENC_MAX_PASSWORD + 1], canon[2048];
@@ -2334,7 +2911,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
     progress pg;
     uint64_t cipher_len = 0, fsize = 0, hdr_end;
     unsigned long t0 = now_ms();
-    int rc = RC_ERR, direct = 0, inter = 0, tries, r;
+    int rc = RC_ERR, direct = 0, inter = 0, tries, r, post;
 
     memset(&h, 0, sizeof h);
     memset(pw, 0, sizeof pw);
@@ -2349,6 +2926,11 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
     }
     if (parse_header(in, &h))
         goto done;
+    if (h.archive && !o->force && is_directory(out_path)) {
+        fail("output directory '%s' already exists (use -f to overwrite)",
+             out_path);
+        goto done;
+    }
     hdr_end = (uint64_t)benc_ftell(in);
     if (stream_size(in, &fsize) != 0 || fsize < hdr_end)
         fsize = hdr_end;
@@ -2387,10 +2969,24 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         fail("cannot rewind input");
         goto done;
     }
-    out = open_output(out_path, &tmp, &direct);
-    if (!out) {
-        fail_errno("cannot create output", tmp ? tmp : out_path);
-        goto done;
+    post = (h.comp != COMP_NONE || h.archive);
+    if (post) {
+        mid = stage_path(out_path, "dec");
+        if (!mid) {
+            fail("cannot create a temporary file next to '%s'", out_path);
+            goto done;
+        }
+        out = fopen(mid, "wb");
+        if (!out) {
+            fail_errno("cannot create temporary file", mid);
+            goto done;
+        }
+    } else {
+        out = open_output(out_path, &tmp, &direct);
+        if (!out) {
+            fail_errno("cannot create output", tmp ? tmp : out_path);
+            goto done;
+        }
     }
     chacha20_init(&cc, enc_key, h.nonce);
     plain.cc = &cc;
@@ -2404,9 +3000,47 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         fail("file is truncated");
         goto done;
     }
-    if (commit_output(&out, tmp, direct, out_path))
+    if (!post) {
+        if (commit_output(&out, tmp, direct, out_path))
+            goto done;
+        report_result(o, "Decrypted", in_path, out_path, cipher_len, t0, "");
+        rc = RC_OK;
         goto done;
-    report_result(o, "Decrypted", in_path, out_path, cipher_len, t0, "");
+    }
+
+    /* staged plaintext: decompress, then unpack or rename into place */
+    if (fclose(out) != 0) {
+        out = NULL;
+        fail("cannot write output");
+        goto done;
+    }
+    out = NULL;
+    {
+        const char *payload = mid;
+
+        if (h.comp != COMP_NONE) {
+            unz = stage_path(out_path, "unz");
+            if (!unz) {
+                fail("cannot create a temporary file next to '%s'", out_path);
+                goto done;
+            }
+            if (run_codec(h.comp, 0, h.threads, mid, unz, 1))
+                goto done;
+            payload = unz;
+        }
+        if (h.archive) {
+            if (decrypt_unpack_archive(payload, in_path, out_path, &h, o, t0,
+                                      cipher_len))
+                goto done;
+        } else {
+            if (rename_over(payload, out_path) != 0) {
+                fail_errno("cannot create output", out_path);
+                goto done;
+            }
+            report_result(o, "Decrypted", in_path, out_path, cipher_len, t0,
+                          "");
+        }
+    }
     rc = RC_OK;
 
 done:
@@ -2424,6 +3058,15 @@ done:
         set_tmp(NULL);
     }
     free(tmp);
+    if (mid) {
+        remove(mid);
+        free(mid);
+    }
+    if (unz) {
+        remove(unz);
+        free(unz);
+    }
+    stage_forget();
     return rc;
 }
 
@@ -2447,21 +3090,35 @@ static int cmd_info(const char *path)
     fclose(in);
 
     printf("File:            %s\n", path);
-    printf("Format version:  %u\n", BENC_FMT_VERSION);
+    printf("Format version:  %u\n", h.version);
     u64_to_dec((uint64_t)h.iterations, num);
     printf("KDF:             %s, %s iterations\n", BENC_KDF_NAME, num);
     printf("Cipher:          %s\n", BENC_CIPHER_NAME);
     printf("MAC:             %s\n", BENC_MAC_NAME);
+    printf("Compression:     %s\n", comp_specs[h.comp].name);
+    if (h.version > BENC_FMT_LEGACY) {
+        printf("Compression level: %d\n", h.level);
+        if (h.threads > 0)
+            printf("Compression threads: %d\n", h.threads);
+        else
+            printf("Compression threads: auto (all cores)\n");
+        printf("Input:           %s\n",
+               h.archive ? "directory archive (tar)" : "file");
+    }
     printf("Original name:   %s\n", h.name_len ? h.name : "(not stored)");
     if (h.size_known) {
         u64_to_dec(h.size, num);
-        printf("Original size:   %s bytes\n", num);
+        if (h.version > BENC_FMT_LEGACY)
+            printf("Stored size:     %s bytes (plaintext after compression)\n",
+                   num);
+        else
+            printf("Original size:   %s bytes\n", num);
     } else {
         printf("Original size:   (not stored)\n");
     }
     if (body >= BENC_TAG_LEN) {
         u64_to_dec(body - BENC_TAG_LEN, num);
-        printf("Payload size:    %s bytes\n", num);
+        printf("Ciphertext size: %s bytes\n", num);
     }
     return RC_OK;
 }
@@ -2693,11 +3350,20 @@ static void usage(FILE *fp)
         "  -p, --password PASS    Use PASS (insecure: visible in process list)\n"
         "  -P, --password-file F  Read the password from the first line of F\n"
         "  -i, --iterations N     PBKDF2 iterations (default %lu)\n"
+        "  -c, --compress NAME    Compress before encrypting: lzma2 (default),\n"
+        "                         zstd, none\n"
+        "      --no-compress      Same as --compress none\n"
+        "  -l, --level N          Compression level (codec default when omitted)\n"
+        "  -T, --threads N        Worker threads for the compressor (0 = all)\n"
         "  -f, --force            Overwrite an existing output file\n"
         "  -n, --use-header-name  On decrypt, restore the stored file name\n"
         "  -q, --quiet            No progress and no result message\n"
         "  -h, --help             Show this help\n"
         "  -v, --version          Show version\n"
+        "\n"
+        "A directory is packed into a tar archive before it is encrypted, and\n"
+        "unpacked again after decryption.  Compression uses the built-in\n"
+        "native codec (lzma2 or zstd).\n"
         "\n"
         "While working the program uses a single terminal line for the\n"
         "password prompt, progress and result.\n"
@@ -2779,10 +3445,35 @@ static int parse_options(int argc, char **argv, int start, opts *o,
             NEED_VALUE();
             if (parse_iter(val, &o->iterations))
                 return 1;
+        } else if (!strcmp(a, "-c") || !strcmp(a, "--compress") ||
+                   !strcmp(a, "--compression")) {
+            int id;
+            NEED_VALUE();
+            id = comp_lookup(val);
+            if (id < 0)
+                return fail("unknown compression '%s' (lzma2, zstd, none)",
+                            val);
+            o->compress = id;
+        } else if (!strcmp(a, "--no-compress")) {
+            o->compress = COMP_NONE;
+        } else if (!strcmp(a, "-l") || !strcmp(a, "--level")) {
+            uint64_t lv;
+            NEED_VALUE();
+            if (dec_to_u64(val, &lv) || lv > 22)
+                return fail("invalid compression level");
+            o->level = (int)lv;
+        } else if (!strcmp(a, "-T") || !strcmp(a, "--threads")) {
+            uint64_t th;
+            NEED_VALUE();
+            if (dec_to_u64(val, &th) || th > BENC_MAX_THREADS)
+                return fail("invalid thread count");
+            o->threads = (long)th;
         } else if (!strcmp(a, "-f") || !strcmp(a, "--force")) {
             o->force = 1;
         } else if (!strcmp(a, "-n") || !strcmp(a, "--use-header-name")) {
             o->use_header_name = 1;
+        } else if (!strcmp(a, "--no-name")) {
+            o->no_name = 1;
         } else if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) {
             o->quiet = 1;
         } else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
@@ -2857,6 +3548,9 @@ int main(int argc, char **argv)
 
     memset(&o, 0, sizeof o);
     o.iterations = BENC_DEFAULT_ITER;
+    o.compress = COMP_LZMA2;
+    o.level = -1;
+    o.threads = 0;
     rc = parse_options(argc, argv, 1 + consumed, &o, pos, &npos);
     if (rc == 2)
         return 0;
