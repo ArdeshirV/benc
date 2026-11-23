@@ -57,36 +57,57 @@ i=0
 while [ $i -lt 512 ]; do printf '\000' >> "$WORK/nulbytes.bin"; i=$((i + 1)); done
 
 for f in empty.bin one.bin text.txt crlf.txt rand4k.bin rand1m.bin nulbytes.bin; do
-    "$BENC" encrypt -q -p "$PW" "$WORK/$f" >/dev/null 2>&1
-    if [ ! -f "$WORK/$f.benc" ]; then
+    "$BENC" encrypt -q -f --textout -p "$PW" "$WORK/$f" >/dev/null 2>&1
+    if [ ! -f "$WORK/$f.bct" ]; then
         bad "encrypt $f (no output produced)"
         continue
     fi
-    "$BENC" decrypt -q -p "$PW" "$WORK/$f.benc" -o "$WORK/$f.out" >/dev/null 2>&1
+    "$BENC" decrypt -q -p "$PW" "$WORK/$f.bct" -o "$WORK/$f.out" >/dev/null 2>&1
     expect_same "round trip $f" "$WORK/$f" "$WORK/$f.out"
 done
 
 echo "== output is text =="
-if LC_ALL=C grep -q '[^[:print:][:space:]]' "$WORK/text.txt.benc"; then
+if LC_ALL=C grep -q '[^[:print:][:space:]]' "$WORK/text.txt.bct"; then
     bad "container is plain text"
 else
     ok "container is plain text"
 fi
 
-if head -1 "$WORK/text.txt.benc" | grep -q 'BEGIN BENC FILE'; then
+if head -1 "$WORK/text.txt.bct" | grep -q 'BEGIN BENC FILE'; then
     ok "container has a readable header"
 else
     bad "container has a readable header"
 fi
 
+echo "== binary container (-b) =="
+"$BENC" encrypt -q -f -b -p "$PW" "$WORK/text.txt" -o "$WORK/bin.txt.bcb" >/dev/null 2>&1
+if [ -f "$WORK/bin.txt.bcb" ]; then
+    ok "binary output produced"
+else
+    bad "binary output produced"
+fi
+if head -c 5 "$WORK/bin.txt.bcb" | grep -q '^benc'; then
+    ok "binary output starts with the container magic"
+else
+    bad "binary output starts with the container magic"
+fi
+"$BENC" decrypt -q -f -p "$PW" "$WORK/bin.txt.bcb" -o "$WORK/bin.txt.out" >/dev/null 2>&1
+expect_same "binary round trip text.txt" "$WORK/text.txt" "$WORK/bin.txt.out"
+"$BENC" encrypt -q -f -t -p "$PW" "$WORK/text.txt" -o "$WORK/t.txt.bct" >/dev/null 2>&1
+if head -1 "$WORK/t.txt.bct" | grep -q 'BEGIN BENC FILE'; then
+    ok "-t writes the text container"
+else
+    bad "-t writes the text container"
+fi
+
 echo "== wrong password =="
-"$BENC" decrypt -q -f -p 'wrong password' "$WORK/text.txt.benc" \
+"$BENC" decrypt -q -f -p 'wrong password' "$WORK/text.txt.bct" \
     -o "$WORK/wrong.out" >/dev/null 2>&1
 expect_rc "wrong password is rejected" 2 $?
 expect_file_missing "no plaintext written on failure" "$WORK/wrong.out"
 
 echo "== tampering =="
-cp "$WORK/text.txt.benc" "$WORK/tamper.benc"
+cp "$WORK/text.txt.bct" "$WORK/tamper.benc"
 # flip a character in the middle of the payload
 awk '/BEGIN BENC DATA/ { indata = 1; print; next }
      indata && !done { c = substr($0, 3, 1); r = (c == "A") ? "B" : "A";
@@ -98,7 +119,7 @@ awk '/BEGIN BENC DATA/ { indata = 1; print; next }
 expect_rc "modified payload is rejected" 2 $?
 expect_file_missing "no plaintext written for modified payload" "$WORK/tamper.out"
 
-cp "$WORK/text.txt.benc" "$WORK/tamperh.benc"
+cp "$WORK/text.txt.bct" "$WORK/tamperh.benc"
 sed 's/^Iterations: 210000$/Iterations: 210001/' "$WORK/tamperh.benc" > "$WORK/tamperh2.benc"
 "$BENC" decrypt -q -f -p "$PW" "$WORK/tamperh2.benc" \
     -o "$WORK/tamperh.out" >/dev/null 2>&1
@@ -106,8 +127,8 @@ rc=$?
 if [ "$rc" -ne 0 ]; then ok "modified header is rejected"; else bad "modified header is rejected"; fi
 
 echo "== truncated input =="
-SIZE=$(wc -c < "$WORK/text.txt.benc")
-head -c $((SIZE - 40)) "$WORK/text.txt.benc" > "$WORK/trunc.benc"
+SIZE=$(wc -c < "$WORK/text.txt.bct")
+head -c $((SIZE - 40)) "$WORK/text.txt.bct" > "$WORK/trunc.benc"
 "$BENC" decrypt -q -f -p "$PW" "$WORK/trunc.benc" -o "$WORK/trunc.out" >/dev/null 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "truncated container is rejected"; else bad "truncated container is rejected"; fi
@@ -119,9 +140,10 @@ rc=$?
 if [ "$rc" -ne 0 ]; then ok "foreign file is rejected"; else bad "foreign file is rejected"; fi
 
 echo "== overwrite protection =="
-"$BENC" encrypt -q -p "$PW" "$WORK/text.txt" >/dev/null 2>&1
+"$BENC" encrypt -q -f --textout -p "$PW" "$WORK/text.txt" -o "$WORK/text.txt.bct" >/dev/null 2>&1
+"$BENC" encrypt -q -p "$PW" "$WORK/text.txt" -o "$WORK/text.txt.bct" >/dev/null 2>&1
 expect_rc "existing output requires -f" 1 $?
-"$BENC" encrypt -q -f -p "$PW" "$WORK/text.txt" >/dev/null 2>&1
+"$BENC" encrypt -q -f --textout -p "$PW" "$WORK/text.txt" -o "$WORK/text.txt.bct" >/dev/null 2>&1
 expect_rc "force overwrites" 0 $?
 
 echo "== randomness =="
@@ -134,13 +156,13 @@ else
 fi
 
 echo "== metadata =="
-if "$BENC" info "$WORK/text.txt.benc" | grep -q 'Original name:[[:space:]]*text.txt'; then
+if "$BENC" info "$WORK/text.txt.bct" | grep -q 'Original name:[[:space:]]*text.txt'; then
     ok "v4 stores the file name"
 else
     bad "v4 stores the file name"
 fi
 
-"$BENC" encrypt -q -f --no-name -p "$PW" "$WORK/text.txt" -o "$WORK/noname.benc" >/dev/null 2>&1
+"$BENC" encrypt -q -f --textout --no-name -p "$PW" "$WORK/text.txt" -o "$WORK/noname.benc" >/dev/null 2>&1
 mkdir -p "$WORK/nn"
 cp "$WORK/noname.benc" "$WORK/nn/x.benc"
 ( cd "$WORK/nn" && "$BENC" decrypt -q -f -p "$PW" -n x.benc >/dev/null 2>&1 )
@@ -151,7 +173,7 @@ else
 fi
 
 mkdir -p "$WORK/sub"
-cp "$WORK/text.txt.benc" "$WORK/sub/renamed.benc"
+cp "$WORK/text.txt.bct" "$WORK/sub/renamed.benc"
 ( cd "$WORK/sub" && "$BENC" decrypt -q -f -p "$PW" -n renamed.benc >/dev/null 2>&1 )
 if cmp -s "$WORK/text.txt" "$WORK/sub/text.txt"; then
     ok "-n restores the stored file name"
@@ -160,7 +182,7 @@ else
 fi
 
 echo "== compression =="
-if "$BENC" info "$WORK/text.txt.benc" | grep -q 'Compression:[[:space:]]*lzma'; then
+if "$BENC" info "$WORK/text.txt.bct" | grep -q 'Compression:[[:space:]]*lzma'; then
     ok "lzma2 is the default compression"
 else
     bad "lzma2 is the default compression"
@@ -173,7 +195,7 @@ for m in lzma zstd none; do
     expect_same "--compress $m round trip" "$WORK/text.txt" "$WORK/c-$m.out"
 done
 
-"$BENC" encrypt -q -f --no-compress -p "$PW" "$WORK/text.txt" \
+"$BENC" encrypt -q -f --textout --no-compress -p "$PW" "$WORK/text.txt" \
     -o "$WORK/c-off.benc" >/dev/null 2>&1
 if "$BENC" info "$WORK/c-off.benc" | grep -q 'Compression:[[:space:]]*none'; then
     ok "--no-compress disables compression"
@@ -208,12 +230,12 @@ if [ "$rc" -ne 0 ]; then ok "version 2 containers are rejected"; else bad "versi
 expect_file_missing "no plaintext for rejected v2 container" "$WORK/v2.out"
 
 echo "== post quantum container =="
-if "$BENC" info "$WORK/text.txt.benc" | grep -q 'Cipher:[[:space:]]*ChaCha20'; then
+if "$BENC" info "$WORK/text.txt.bct" | grep -q 'Cipher:[[:space:]]*ChaCha20'; then
     ok "new containers use the ChaCha20 cipher"
 else
     bad "new containers use the ChaCha20 cipher"
 fi
-if "$BENC" info "$WORK/text.txt.benc" | grep -q 'MAC:[[:space:]]*HMAC-SHA256'; then
+if "$BENC" info "$WORK/text.txt.bct" | grep -q 'MAC:[[:space:]]*HMAC-SHA256'; then
     ok "new containers authenticate with HMAC-SHA256"
 else
     bad "new containers authenticate with HMAC-SHA256"
@@ -224,7 +246,7 @@ rc=$?
 if [ "$rc" -ne 0 ]; then ok "--legacy is rejected"; else bad "--legacy is rejected"; fi
 expect_file_missing "--legacy does not write a container" "$WORK/v1.benc"
 
-sed 's/^Version: 4$/Version: 1/' "$WORK/text.txt.benc" > "$WORK/downgrade.benc"
+sed 's/^Version: 4$/Version: 1/' "$WORK/text.txt.bct" > "$WORK/downgrade.benc"
 "$BENC" decrypt -q -f -p "$PW" "$WORK/downgrade.benc" -o "$WORK/dg.out" >/dev/null 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "version downgrade is rejected"; else bad "version downgrade is rejected"; fi
@@ -232,7 +254,7 @@ expect_file_missing "no plaintext for downgraded container" "$WORK/dg.out"
 
 echo "== password input modes =="
 printf '%s\n' "$PW" > "$WORK/pw.txt"
-"$BENC" decrypt -q -f -P "$WORK/pw.txt" "$WORK/text.txt.benc" \
+"$BENC" decrypt -q -f -P "$WORK/pw.txt" "$WORK/text.txt.bct" \
     -o "$WORK/pwfile.out" >/dev/null 2>&1
 expect_same "--password-file works" "$WORK/text.txt" "$WORK/pwfile.out"
 
@@ -251,14 +273,14 @@ expect_same "custom iteration count" "$WORK/text.txt" "$WORK/fast.out"
 expect_same "iteration count comes from the header" "$WORK/text.txt" "$WORK/x.out"
 
 echo "== rekey =="
-cp "$WORK/text.txt.benc" "$WORK/rk.benc"
+cp "$WORK/text.txt.bct" "$WORK/rk.benc"
 "$BENC" rekey -q -p "$PW" --new-password 'new password' "$WORK/rk.benc" >/dev/null 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "rekey is not a supported command"; else bad "rekey is not a supported command"; fi
-expect_same "rekey leaves the file untouched" "$WORK/text.txt.benc" "$WORK/rk.benc"
+expect_same "rekey leaves the file untouched" "$WORK/text.txt.bct" "$WORK/rk.benc"
 
 echo "== every header byte is authenticated =="
-"$BENC" encrypt -q -f -i 1000 -p "$PW" "$WORK/text.txt" -o "$WORK/hdr.benc" >/dev/null 2>&1
+"$BENC" encrypt -q -f --textout -i 1000 -p "$PW" "$WORK/text.txt" -o "$WORK/hdr.benc" >/dev/null 2>&1
 HDR_LEN=$(awk '/BEGIN BENC DATA/ { print length_all; exit } { length_all += length($0) + 1 }' "$WORK/hdr.benc")
 total=0
 badflip=0

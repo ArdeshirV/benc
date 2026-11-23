@@ -43,6 +43,8 @@
 #  include <fcntl.h>
 #  include <dirent.h>
 #  include <termios.h>
+#elif BENC_DOS
+#  include <unistd.h>
 #endif
 
 /* ---------------------------------------------------------------- */
