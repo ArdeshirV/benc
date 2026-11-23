@@ -62,6 +62,7 @@ Options:
 | `-T, --threads N` | worker threads for the compressor (`0` = all cores) |
 | `-f, --force` | overwrite an existing output file |
 | `-n, --use-header-name` | on decrypt, restore the original file name |
+| `--no-name` | on encrypt, don't store the original file name |
 | `-q, --quiet` | suppress informational messages |
 
 If no command is given, benc detects the container by its header and encrypts
@@ -230,10 +231,24 @@ clear message when a toolchain is missing.
 ```
 make                  # native build, produces ./benc
 make linux            # -> build/linux/benc
+make linux-386        # -> build/linux-386/benc
+make linux-amd64      # -> build/linux-amd64/benc
+make linux-arm        # -> build/linux-arm/benc
+make linux-arm64      # -> build/linux-arm64/benc
 make macos            # -> build/macos/benc
+make macos-amd64      # -> build/macos-amd64/benc
+make macos-arm64      # -> build/macos-arm64/benc
 make termux           # -> build/termux/benc
 make bsd              # -> build/bsd/benc
+make bsd-386          # -> build/bsd-386/benc
+make bsd-amd64        # -> build/bsd-amd64/benc
+make bsd-arm          # -> build/bsd-arm/benc
+make bsd-arm64        # -> build/bsd-arm64/benc
 make windows          # -> build/windows-amd64/benc.exe + build/windows-386/benc.exe
+make windows-amd64    # -> build/windows-amd64/benc.exe
+make windows-386      # -> build/windows-386/benc.exe
+make windows-arm      # -> build/windows-arm/benc.exe
+make windows-arm64    # -> build/windows-arm64/benc.exe
 make dos              # -> build/dos/benc.exe
 make all-platforms    # build every platform whose toolchain is installed
 make check            # show which toolchains were detected
@@ -287,3 +302,7 @@ Makefile             cross-platform build
 tests/run_tests.sh   end-to-end test suite (make test)
 tests/data/          compatibility fixtures (version 2 and 3 lineage)
 ```
+
+## License
+
+MIT License. See `LICENSE` for details.
