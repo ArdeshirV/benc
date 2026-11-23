@@ -1640,7 +1640,7 @@ static int read_body(FILE *fp, b64_sink sink, void *ctx, progress *pg,
         if (n == 0) {
             if (in_tail)
                 break;
-            rc = fail(ferror(fp) ? "read error" :
+            rc = failc(RC_FORMAT, ferror(fp) ? "read error" :
                       "unexpected end of file inside data block");
             goto out;
         }
@@ -2771,7 +2771,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     if (comp_specs[comp].max_level &&
         (level < comp_specs[comp].min_level ||
          level > comp_specs[comp].max_level))
-        return fail("%s compression levels are %d..%d", comp_specs[comp].name,
+        return failc(RC_USAGE, "%s compression levels are %d..%d", comp_specs[comp].name,
                     comp_specs[comp].min_level, comp_specs[comp].max_level);
     {
         int pr = get_password(o, pw, sizeof pw, 1, "", &inter);
@@ -3372,7 +3372,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
                 continue;
             }
             rc = RC_AUTH;
-            fail("wrong password, or the file has been modified");
+            failc(RC_AUTH, "wrong password, or the file has been modified");
         }
         goto done;
     }
@@ -4025,7 +4025,7 @@ int main(int argc, char **argv)
         return cmd_info(pos[0]);
     }
     if (npos < 1 || npos > 2)
-        return fail(cmd == C_AUTO ? "expected <input> [output]"
+        return failc(RC_USAGE, cmd == C_AUTO ? "expected <input> [output]"
                                   : "expected <input> [output] after the command");
     in_path = pos[0];
     if (o.output && npos == 2)
