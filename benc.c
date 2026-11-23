@@ -901,8 +901,13 @@ static void chacha20_xor(chacha20_ctx *c, uint8_t *d, size_t n)
     while (n >= 64) {
         chacha20_block(x, c->st);
         chacha20_advance(c);
-        for (i = 0; i < 16; i++)
-            put_le32(d + 4 * i, le32(d + 4 * i) ^ x[i]);
+        {
+            uint32_t block[16];
+            memcpy(block, d, 64);
+            for (i = 0; i < 16; i++)
+                block[i] ^= x[i];
+            memcpy(d, block, 64);
+        }
         d += 64;
         n -= 64;
     }

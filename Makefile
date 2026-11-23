@@ -42,6 +42,7 @@
 # Every variable can be overridden, e.g.
 #   make windows WIN64_CC=/opt/mingw/bin/x86_64-w64-mingw32-gcc
 #   make linux-arm64 LINUX_ARM64_CC=aarch64-linux-gnu-gcc
+#   make CFLAGS="-O3 -march=native"   (host-specific optimization)
 # ---------------------------------------------------------------------------
 
 APP     := benc
