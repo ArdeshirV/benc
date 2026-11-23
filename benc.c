@@ -1891,32 +1891,37 @@ static char *benc_nosep_dup(const char *path)
     }
 }
 
-static char *default_encrypt_output(const char *in)
-{
-    {
-        char *t = benc_nosep_dup(in);
-        char *r;
-#if BENC_DOS
-        r = t ? xstrdup_cat(t, stem_len(t), ".BCT") : NULL;
-#else
-        r = t ? xstrdup_cat(t, strlen(t), ".bct") : NULL;
-#endif
-        free(t);
-        return r;
-    }
-}
-
-static char *default_binary_output(const char *in)
+static char *default_output_name(const char *in, const char *ext)
 {
     char *t = benc_nosep_dup(in);
     char *r;
 #if BENC_DOS
-    r = t ? xstrdup_cat(t, stem_len(t), ".BBC") : NULL;
+    r = t ? xstrdup_cat(t, stem_len(t), ext) : NULL;
 #else
-    r = t ? xstrdup_cat(t, strlen(t), ".bcb") : NULL;
+    r = t ? xstrdup_cat(t, strlen(t), ext) : NULL;
 #endif
     free(t);
     return r;
+}
+
+static char *default_encrypt_output(const char *in)
+{
+    return default_output_name(in,
+#if BENC_DOS
+                               ".BCT");
+#else
+                               ".bct");
+#endif
+}
+
+static char *default_binary_output(const char *in)
+{
+    return default_output_name(in,
+#if BENC_DOS
+                               ".BBC");
+#else
+                               ".bcb");
+#endif
 }
 
 static char *default_decrypt_output(const char *in)
@@ -2881,6 +2886,29 @@ done:
     return rc;
 }
 
+/* Shared verification tail: finish HMAC, compare the tag, and report the
+ * ciphertext length.  Returns RC_OK, RC_AUTH or RC_ERR. */
+static int verify_auth(hmac_ctx *mac, verify_ctx *ver, progress *pg,
+                       uint64_t *cipher_len)
+{
+    uint8_t computed[BENC_TAG_LEN];
+
+    if (ver->total < BENC_TAG_LEN || ver->hlen != BENC_TAG_LEN) {
+        progress_finish(pg);
+        return fail("file is truncated");
+    }
+    hmac_final(mac, computed);
+    if (!ct_equal(computed, ver->hold, BENC_TAG_LEN)) {
+        progress_finish(pg);
+        benc_wipe(computed, sizeof computed);
+        return RC_AUTH;
+    }
+    benc_wipe(computed, sizeof computed);
+    progress_finish(pg);
+    *cipher_len = ver->total - BENC_TAG_LEN;
+    return RC_OK;
+}
+
 /* pass 1: authenticate the whole file.  RC_OK, RC_AUTH or RC_ERR */
 static int verify_pass(FILE *in, const benc_header *h, const char *canon,
                        const uint8_t *mac_key, uint64_t body_bytes,
@@ -2888,7 +2916,7 @@ static int verify_pass(FILE *in, const benc_header *h, const char *canon,
 {
     hmac_ctx mac;
     verify_ctx ver;
-    uint8_t computed[BENC_TAG_LEN];
+    int r;
     progress pg;
 
     hmac_init(&mac, mac_key, BENC_KEY_LEN);
@@ -2899,18 +2927,11 @@ static int verify_pass(FILE *in, const benc_header *h, const char *canon,
     progress_begin(&pg, "Verifying", body_bytes + hdr_end, 1);
     if (read_body(in, verify_push, &ver, &pg, hdr_end))
         return RC_ERR;
-    if (ver.total < BENC_TAG_LEN || ver.hlen != BENC_TAG_LEN)
-        return fail("file is truncated");
-    hmac_final(&mac, computed);
-    if (!ct_equal(computed, ver.hold, BENC_TAG_LEN)) {
-        benc_wipe(computed, sizeof computed);
-        return RC_AUTH;
-    }
-    benc_wipe(computed, sizeof computed);
-    *cipher_len = ver.total - BENC_TAG_LEN;
+    r = verify_auth(&mac, &ver, &pg, cipher_len);
+    if (r != RC_OK)
+        return r;
     if (h->size_known && h->size != *cipher_len)
         return fail("file is truncated");
-    progress_finish(&pg);
     return RC_OK;
 }
 
@@ -2921,7 +2942,6 @@ static int verify_bin(FILE *in, const char *canon, size_t clen,
 {
     hmac_ctx mac;
     verify_ctx ver;
-    uint8_t computed[BENC_TAG_LEN];
     uint8_t buf[BENC_CHUNK];
     uint64_t remaining = body_bytes;
     progress pg;
@@ -2943,20 +2963,7 @@ static int verify_bin(FILE *in, const char *canon, size_t clen,
         }
         remaining -= n;
     }
-    if (ver.total < BENC_TAG_LEN || ver.hlen != BENC_TAG_LEN) {
-        progress_finish(&pg);
-        return fail("file is truncated");
-    }
-    hmac_final(&mac, computed);
-    if (!ct_equal(computed, ver.hold, BENC_TAG_LEN)) {
-        progress_finish(&pg);
-        benc_wipe(computed, sizeof computed);
-        return RC_AUTH;
-    }
-    benc_wipe(computed, sizeof computed);
-    progress_finish(&pg);
-    *cipher_len = ver.total - BENC_TAG_LEN;
-    return RC_OK;
+    return verify_auth(&mac, &ver, &pg, cipher_len);
 }
 
 static int decrypt_unpack_archive(const char *tar, const char *in_path,
