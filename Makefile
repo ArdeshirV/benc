@@ -30,6 +30,7 @@
 #   make nace-drex        optional Nace Drex client -> build/nace/nace-drex
 #   make install          install the native binary into $(PREFIX)/bin
 #   make clean            remove all build products
+#   make optimized          host-specific optimized build (-march=native) -> ./benc
 #
 # Cross builds use freely available toolchains:
 #   Debian/Ubuntu : apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
@@ -161,7 +162,7 @@ ifeq ($(STATIC),1)
 endif
 
 # ------------------------------------------------------------- targets ----
-.PHONY: all native linux linux-386 linux-amd64 linux-arm linux-arm64 macos macos-amd64 macos-arm64 \
+.PHONY: all native optimized linux linux-386 linux-amd64 linux-arm linux-arm64 macos macos-amd64 macos-arm64 \
         macos-universal termux termux-arm64 bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 solaris windows windows-amd64 \
         windows-386 windows-arm windows-arm64 windows-msvc dos all-platforms check test \
         nace-drex install clean distclean help
@@ -178,6 +179,9 @@ $(SRC):
 endif
 
 native: $(APP)$(EXE)
+
+optimized: CFLAGS += -march=native
+optimized: $(APP)$(EXE)
 
 $(APP)$(EXE): $(SRC) $(HDRS)
 	$(CC) $(CFLAGS) $(WARN) -DBENC_POSIX -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
@@ -598,4 +602,4 @@ clean:
 distclean: clean
 
 help:
-	@sed -n '2,31p' Makefile | sed 's|^# \{0,1\}||; s|\$$(PREFIX)|$(PREFIX)|g'
+	@sed -n '2,33p' Makefile | sed 's|^# \{0,1\}||; s|\$$(PREFIX)|$(PREFIX)|g'
