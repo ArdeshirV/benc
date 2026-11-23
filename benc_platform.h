@@ -6,7 +6,16 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
+
+#if defined(BENC_WINDOWS)
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <io.h>
+#  include <fcntl.h>
+#endif
 
 /* ---------------------------------------------------------------- */
 /* feature macros                                                    */
@@ -77,17 +86,14 @@ static inline int benc_isatty(int fd)
 #endif
 }
 
-#if defined(BENC_WINDOWS)
 static inline int benc_get_terminal_width(void)
 {
+#if defined(BENC_WINDOWS)
     CONSOLE_SCREEN_BUFFER_INFO ci;
     if (GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE), &ci))
         return ci.srWindow.Right - ci.srWindow.Left + 1;
     return 0;
-}
 #elif defined(BENC_POSIX)
-static inline int benc_get_terminal_width(void)
-{
     int w = 0;
 #ifdef TIOCGWINSZ
     struct winsize ws;
@@ -100,13 +106,10 @@ static inline int benc_get_terminal_width(void)
             w = atoi(c);
     }
     return w;
-}
 #else
-static inline int benc_get_terminal_width(void)
-{
     return 0;
-}
 #endif
+}
 
 /* ---------------------------------------------------------------- */
 /* random bytes                                                       */
@@ -168,7 +171,18 @@ static inline int benc_same_file(const char *a, const char *b)
 #endif
 }
 
-int benc_stream_size(FILE *fp, uint64_t *size);
+static inline int benc_stream_size(FILE *fp, uint64_t *size)
+{
+    benc_off_t cur = benc_ftell(fp), end;
+
+    if (cur < 0 || benc_fseek(fp, 0, SEEK_END) != 0)
+        return -1;
+    end = benc_ftell(fp);
+    if (end < 0 || benc_fseek(fp, cur, SEEK_SET) != 0)
+        return -1;
+    *size = (uint64_t)end;
+    return 0;
+}
 
 /* ---------------------------------------------------------------- */
 /* path utilities                                                     */
@@ -194,7 +208,27 @@ static inline const char *benc_base_name(const char *path)
 
 const char *benc_ram_temp_dir(void);
 
-int benc_rename_over(const char *from, const char *to);
+static inline int benc_rename_over(const char *from, const char *to)
+{
+#if !defined(BENC_WINDOWS) && !defined(BENC_POSIX)
+    remove(to);
+    return rename(from, to);
+#else
+    if (rename(from, to) == 0)
+        return 0;
+    /* staging lives in RAM (/dev/shm) but the target is on disk: copy */
+#if defined(BENC_POSIX)
+    if (benc_copy_file(from, to) == 0) {
+        remove(from);
+        return 0;
+    }
+#else
+    remove(to);
+    return rename(from, to);
+#endif
+    return -1;
+#endif
+}
 
 #if defined(BENC_POSIX)
 int benc_copy_file(const char *from, const char *to);

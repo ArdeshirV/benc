@@ -50,38 +50,9 @@
 #include <errno.h>
 #include <time.h>
 #include <signal.h>
+#include "benc_platform.h"
 #include "benc_codecs.h"
 #include "benc_tar.h"
-
-#if defined(_WIN32)
-#  define WIN32_LEAN_AND_MEAN
-#  include <windows.h>
-#  include <conio.h>
-#  include <io.h>
-#  include <fcntl.h>
-#  include <process.h>
-#  include <sys/stat.h>
-#  include <direct.h>
-#  define BENC_WINDOWS 1
-#  define benc_isatty(fd) _isatty(fd)
-#elif defined(__DJGPP__) || defined(__MSDOS__) || defined(_DOS)
-#  include <conio.h>
-#  include <unistd.h>
-#  define BENC_DOS 1
-#  define benc_isatty(fd) isatty(fd)
-#else
-#  include <unistd.h>
-#  include <termios.h>
-#  include <sys/types.h>
-#  include <sys/stat.h>
-#  include <sys/time.h>
-#  include <sys/ioctl.h>
-#  include <sys/wait.h>
-#  include <fcntl.h>
-#  include <dirent.h>
-#  define BENC_POSIX 1
-#  define benc_isatty(fd) isatty(fd)
-#endif
 
 /* ------------------------------------------------------------------ */
 /* constants                                                           */
@@ -174,30 +145,6 @@ static int comp_lookup(const char *name)
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
 /* ------------------------------------------------------------------ */
-
-static void benc_wipe(void *p, size_t n)
-{
-    volatile uint8_t *q = (volatile uint8_t *)p;
-    while (n--)
-        *q++ = 0;
-}
-
-static unsigned long now_ms(void)
-{
-#if defined(BENC_WINDOWS)
-    return (unsigned long)GetTickCount();
-#elif defined(BENC_POSIX)
-    struct timeval tv;
-    if (gettimeofday(&tv, NULL) != 0)
-        return 0;
-    return (unsigned long)tv.tv_sec * 1000ul + (unsigned long)(tv.tv_usec / 1000);
-#elif defined(__DJGPP__)
-    return (unsigned long)((unsigned long)clock() * 1000ul /
-                           (unsigned long)CLOCKS_PER_SEC);
-#else
-    return (unsigned long)time(NULL) * 1000ul;
-#endif
-}
 
 static void u64_to_dec(uint64_t v, char *out)
 {
