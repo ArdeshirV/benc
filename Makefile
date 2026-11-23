@@ -10,6 +10,7 @@
 #   make macos            macOS (host arch)   -> build/macos/benc
 #   make macos-amd64      macOS x86_64        -> build/macos-amd64/benc
 #   make macos-arm64      macOS arm64         -> build/macos-arm64/benc
+#   make macos-universal  macOS arm64 + amd64 -> build/macos-universal/benc
 #   make termux           Termux/Android      -> build/termux/benc
 #   make bsd              *BSD (host arch)    -> build/bsd/benc
 #   make bsd-386          *BSD i386           -> build/bsd-386/benc
@@ -159,7 +160,7 @@ endif
 
 # ------------------------------------------------------------- targets ----
 .PHONY: all native linux linux-386 linux-amd64 linux-arm linux-arm64 macos macos-amd64 macos-arm64 \
-        termux bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 solaris windows windows-amd64 \
+        macos-universal termux bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 solaris windows windows-amd64 \
         windows-386 windows-arm windows-arm64 windows-msvc dos all-platforms check test \
         nace-drex install clean distclean help
 
@@ -306,6 +307,19 @@ else
 	@echo "macos-arm64: run this on macOS, or set MACOS_ARM64_CC (osxcross)" >&2
 	@exit 1
 endif
+
+# ---------------------------------------------------------- macos-universal --
+# macOS universal binary: arm64 + amd64 slices (requires the Xcode CLT for lipo).
+macos-universal:
+	$(MAKE) macos-arm64
+	$(MAKE) macos-amd64
+	@command -v lipo >/dev/null 2>&1 || { \
+	  echo "macos-universal: lipo not found." >&2; \
+	  echo "  install the Xcode Command Line Tools: xcode-select --install" >&2; \
+	  exit 1; }
+	@mkdir -p $(BUILD)/macos-universal
+	@lipo -create $(BUILD)/macos-arm64/$(APP) $(BUILD)/macos-amd64/$(APP) \
+	    -output $(BUILD)/macos-universal/$(APP)
 
 # -------------------------------------------------------------- termux ----
 termux:
