@@ -5,6 +5,7 @@
 #  ifndef _POSIX_C_SOURCE
 #    define _POSIX_C_SOURCE 200809L
 #  endif
+#  define BC_TAR_POSIX 1
 #endif
 
 #include "benc_tar.h"
@@ -13,7 +14,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#if defined(BENC_POSIX)
+#if defined(BC_TAR_POSIX)
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
@@ -70,7 +71,15 @@ static int tar_write_pad(FILE *out, size_t size)
     return 0;
 }
 
-static int tar_add_file(const char *fsname, const char *arcname, FILE *out)
+static int tar_is_dot_entry(const char *name)
+{
+    return name[0] == '.' &&
+           (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
+}
+
+static int tar_add_file(const char *fsname, const char *arcname, FILE *out,
+                        benc_tar_progress_fn cb, void *cb_ctx,
+                        unsigned long long *done, unsigned long long total)
 {
     FILE *f = fopen(fsname, "rb");
     struct stat st;
@@ -87,6 +96,9 @@ static int tar_add_file(const char *fsname, const char *arcname, FILE *out)
         fclose(f);
         return -1;
     }
+    *done += 512;
+    if (cb)
+        cb(*done, total, cb_ctx);
     rem = (size_t)st.st_size;
     while (rem > 0) {
         size_t n = rem > sizeof buf ? sizeof buf : rem;
@@ -99,12 +111,25 @@ static int tar_add_file(const char *fsname, const char *arcname, FILE *out)
             return -1;
         }
         rem -= n;
+        *done += n;
+        if (cb)
+            cb(*done, total, cb_ctx);
     }
     fclose(f);
-    return tar_write_pad(out, (size_t)st.st_size);
+    {
+        size_t pad = (size_t)((512 - ((size_t)st.st_size % 512)) % 512);
+        if (tar_write_pad(out, (size_t)st.st_size) != 0)
+            return -1;
+        *done += pad;
+        if (cb)
+            cb(*done, total, cb_ctx);
+    }
+    return 0;
 }
 
-static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out)
+static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out,
+                       benc_tar_progress_fn cb, void *cb_ctx,
+                       unsigned long long *done, unsigned long long total)
 {
     DIR *d = opendir(fsdir);
     struct dirent *e;
@@ -116,13 +141,15 @@ static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out)
         closedir(d);
         return -1;
     }
+    *done += 512;
+    if (cb)
+        cb(*done, total, cb_ctx);
     while ((e = readdir(d)) != NULL) {
         char child[4096];
         char childarc[BC_TAR_NAME_MAX];
         struct stat st;
 
-        if (e->d_name[0] == '.' && (e->d_name[1] == '\0' ||
-                                   (e->d_name[1] == '.' && e->d_name[2] == '\0')))
+        if (tar_is_dot_entry(e->d_name))
             continue;
         snprintf(child, sizeof child, "%s/%s", fsdir, e->d_name);
         snprintf(childarc, sizeof childarc, "%s%s", arcname, e->d_name);
@@ -133,9 +160,9 @@ static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out)
         if (S_ISDIR(st.st_mode)) {
             char sub[BC_TAR_NAME_MAX + 2];
             snprintf(sub, sizeof sub, "%s/", childarc);
-            rc = tar_add_dir(child, sub, out);
+            rc = tar_add_dir(child, sub, out, cb, cb_ctx, done, total);
         } else if (S_ISREG(st.st_mode)) {
-            rc = tar_add_file(child, childarc, out);
+            rc = tar_add_file(child, childarc, out, cb, cb_ctx, done, total);
         } else {
             rc = -1;
             break;
@@ -147,13 +174,67 @@ static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out)
     return rc;
 }
 
-int benc_tar_create(const char *dir, const char *name, const char *dst)
+/* first pass: compute the total tar size so the progress bar can show a
+ * percentage while packing.  returns 0 on success. */
+static int tar_add_file_size(const char *fsname, unsigned long long *total)
+{
+    struct stat st;
+
+    if (stat(fsname, &st) != 0)
+        return -1;
+    if (!S_ISREG(st.st_mode))
+        return -1;
+    *total += 512;
+    *total += (unsigned long long)st.st_size;
+    *total += (512 - ((unsigned long long)st.st_size % 512)) % 512;
+    return 0;
+}
+
+static int tar_add_dir_size(const char *fsdir, unsigned long long *total)
+{
+    DIR *d = opendir(fsdir);
+    struct dirent *e;
+    int rc = 0;
+
+    if (!d)
+        return -1;
+    *total += 512;
+    while ((e = readdir(d)) != NULL) {
+        char child[4096];
+        struct stat st;
+
+        if (tar_is_dot_entry(e->d_name))
+            continue;
+        snprintf(child, sizeof child, "%s/%s", fsdir, e->d_name);
+        if (stat(child, &st) != 0) {
+            rc = -1;
+            break;
+        }
+        if (S_ISDIR(st.st_mode))
+            rc = tar_add_dir_size(child, total);
+        else if (S_ISREG(st.st_mode))
+            rc = tar_add_file_size(child, total);
+        else {
+            rc = -1;
+            break;
+        }
+        if (rc)
+            break;
+    }
+    closedir(d);
+    return rc;
+}
+
+int benc_tar_create(const char *dir, const char *name, const char *dst,
+                    benc_tar_progress_fn cb, void *cb_ctx)
 {
     char fsroot[4096];
     char arcroot[BC_TAR_NAME_MAX];
     FILE *out;
     unsigned char z[1024];
-
+    unsigned long long done = 0;
+    unsigned long long total = 0;
+    int have_total = 0;
 
     {
         size_t dlen = strlen(dir);
@@ -165,11 +246,22 @@ int benc_tar_create(const char *dir, const char *name, const char *dst)
     }
     if (snprintf(arcroot, sizeof arcroot, "%s/", name) >= (int)sizeof arcroot)
         return -1;
+
+    /* first pass: compute the total tar size for the progress bar */
+    total = 1024;  /* two zero blocks terminating the archive */
+    if (tar_add_dir_size(fsroot, &total) == 0)
+        have_total = 1;
+    else
+        total = 0;
+    if (cb)
+        cb(0, have_total ? total : 0, cb_ctx);
+
     out = fopen(dst, "wb");
     if (!out)
         return -1;
     {
-        int rc = tar_add_dir(fsroot, arcroot, out);
+        int rc = tar_add_dir(fsroot, arcroot, out, cb, cb_ctx, &done,
+                             have_total ? total : 0);
         if (rc != 0) {
             fclose(out);
             return -1;
@@ -180,6 +272,9 @@ int benc_tar_create(const char *dir, const char *name, const char *dst)
         fclose(out);
         return -1;
     }
+    done += sizeof z;
+    if (cb)
+        cb(done, have_total ? total : 0, cb_ctx);
     if (fclose(out) != 0)
         return -1;
     return 0;
@@ -209,7 +304,8 @@ static int benc_mkdir_p(const char *path)
     return 0;
 }
 
-int benc_tar_extract(const char *src, const char *dest)
+int benc_tar_extract(const char *src, const char *dest,
+                     benc_tar_progress_fn cb, void *cb_ctx)
 {
     FILE *f = fopen(src, "rb");
     char *in = NULL;
@@ -234,6 +330,8 @@ int benc_tar_extract(const char *src, const char *dest)
         return -1;
     fclose(f);
     in[len] = '\0';
+    if (cb)
+        cb(0, (unsigned long long)len, cb_ctx);
 
     while (pos + BC_TAR_BLOCK <= len) {
         unsigned char *h = (unsigned char *)in + pos;
@@ -257,12 +355,6 @@ int benc_tar_extract(const char *src, const char *dest)
             break;
         memcpy(name, h, 100);
         name[100] = '\0';
-        {
-            size_t n = 0;
-            while (n < 100 && name[n] != '\0')
-                n++;
-            name[n] = '\0';
-        }
         {
             char prefix[156];
             size_t pn = 0;
@@ -306,17 +398,16 @@ int benc_tar_extract(const char *src, const char *dest)
             if (flen >= sizeof dirp)
                 return -1;
             memcpy(dirp, full, flen + 1);
-            slash = dirp;
-            while (*slash) {
-                if (*slash == '/')
-                    break;
-                slash++;
-            }
-            if (slash != dirp) {
+            slash = strrchr(dirp, '/');
+            if (slash && slash != dirp) {
                 *slash = '\0';
                 if (benc_mkdir_p(dirp) != 0)
                     return -1;
                 *slash = '/';
+            }
+            if (size > len - pos - BC_TAR_BLOCK) {
+                free(in);
+                return -1;
             }
             {
                 FILE *of = fopen(full, "wb");
@@ -338,23 +429,33 @@ int benc_tar_extract(const char *src, const char *dest)
             return -1;
         }
         pos += BC_TAR_BLOCK + (((size + 511) / 512) * 512);
+        if (cb)
+            cb((unsigned long long)pos, (unsigned long long)len, cb_ctx);
     }
+    if (cb)
+        cb((unsigned long long)len, (unsigned long long)len, cb_ctx);
     free(in);
     return 0;
 }
 #else
-int benc_tar_create(const char *dir, const char *name, const char *dst)
+int benc_tar_create(const char *dir, const char *name, const char *dst,
+                    benc_tar_progress_fn cb, void *cb_ctx)
 {
     (void)dir;
     (void)name;
     (void)dst;
+    (void)cb;
+    (void)cb_ctx;
     return -1;
 }
 
-int benc_tar_extract(const char *src, const char *dest)
+int benc_tar_extract(const char *src, const char *dest,
+                     benc_tar_progress_fn cb, void *cb_ctx)
 {
     (void)src;
     (void)dest;
+    (void)cb;
+    (void)cb_ctx;
     return -1;
 }
 #endif

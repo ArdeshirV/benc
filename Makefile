@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# benc - one C file, many platforms
+# benc - small C codebase, many platforms
 #
 #   make                  build for the machine you are on        (./benc)
 #   make linux            Linux (host arch)   -> build/linux/benc

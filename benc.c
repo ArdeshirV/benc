@@ -4,8 +4,9 @@
  *   benc encrypt file.bin        -> file.bin.benc   (plain ASCII text)
  *   benc decrypt file.bin.benc   -> file.bin
  *
- * Self contained C99 encryption core; compression is native in this file
- * (LZMA2 and Zstd, no external library or tool).  Builds with gcc/clang
+ * Self contained C99 encryption core.  Compression (LZMA2, Zstd) lives in
+ * benc_codecs.c and directory packing in benc_tar.c; neither needs an
+ * external library or tool.  Builds with gcc/clang
  * (Linux, macOS, Termux, *BSD), MinGW or MSVC (Windows) and DJGPP /
  * ia16-gcc (DOS; use -mcmodel=medium, the tiny model is too small).
  *
@@ -51,11 +52,6 @@
 #include <signal.h>
 #include "benc_codecs.h"
 #include "benc_tar.h"
-#if defined(_WIN32)
-#  include <windows.h>
-#elif !defined(__DJGPP__) && !defined(__MSDOS__) && !defined(_DOS)
-#  include <dlfcn.h>
-#endif
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -444,19 +440,23 @@ typedef struct {
     int           bytes;      /* show sizes and speed */
 } progress;
 
+static char g_force_spin;
+
 static void progress_draw(const progress *p)
 {
-    char head[48], sizes[48], rate[32], bar[UI_MAXW + 1], line[UI_MAXW * 2];
-    char a[24], b[24];
+    char sizes[48], rate[32], bar[UI_MAXW + 1], line[UI_MAXW * 2];
+    char a[24], b[24], pctbuf[8];
+    static const char spin[] = { '|', '/', '-', '\\' };
+    static unsigned spin_i;
     unsigned long el = now_ms() - p->t0;
     uint64_t bps = (el > 0) ? (p->done * 1000u) / el : 0;
-    int pct = 0, level, fill, i;
+    char sp = g_force_spin ? g_force_spin : spin[spin_i++ & 3u];
+    int pct = 0, level, fill, i, bw, fixed;
 
+    pctbuf[0] = '\0';
     if (p->total) {
         pct = (p->done >= p->total) ? 100 : (int)((p->done * 100u) / p->total);
-        sprintf(head, "%s %3d%%", p->label, pct);
-    } else {
-        sprintf(head, "%s", p->label);
+        sprintf(pctbuf, "%3d%%", pct);
     }
     sizes[0] = rate[0] = '\0';
     if (p->bytes) {
@@ -473,14 +473,24 @@ static void progress_draw(const progress *p)
         }
     }
 
-    /* drop optional parts until the line fits the terminal */
+    /* layout: "<sp> [<bar>] <pct>% <label> <sizes>  <rate>"
+     * drop optional parts (rate, sizes, bar) until the line fits. */
     for (level = 0; level < 4; level++) {
         int use_rate  = level < 1 && rate[0];
         int use_sizes = level < 2 && sizes[0];
         int use_bar   = level < 3 && p->total;
-        int fixed = (int)strlen(head) + (use_sizes ? 1 + (int)strlen(sizes) : 0) +
-                    (use_rate ? 2 + (int)strlen(rate) : 0) + (use_bar ? 3 : 0);
-        int bw = ui_w - fixed;
+
+        fixed = 2;  /* spinner + space */
+        if (use_bar)
+            fixed += 3;  /* " [" + "]" */
+        if (pctbuf[0])
+            fixed += (int)strlen(pctbuf) + 1;
+        fixed += (int)strlen(p->label);
+        if (use_sizes)
+            fixed += 1 + (int)strlen(sizes);
+        if (use_rate)
+            fixed += 2 + (int)strlen(rate);
+        bw = ui_w - fixed;
 
         if (use_bar) {
             if (bw < 10)
@@ -490,15 +500,19 @@ static void progress_draw(const progress *p)
             fill = (pct * bw) / 100;
             for (i = 0; i < bw; i++)
                 bar[i] = (i < fill) ? '=' : ' ';
-            if (fill > 0 && fill < bw)
+            if (fill > 0)
                 bar[fill - 1] = '>';
             bar[bw] = '\0';
         } else if (fixed > ui_w && level < 3) {
             continue;
         }
-        strcpy(line, head);
+
+        sprintf(line, "%c ", sp);
         if (use_bar)
-            sprintf(line + strlen(line), " [%s]", bar);
+            sprintf(line + strlen(line), "[%s] ", bar);
+        if (pctbuf[0])
+            sprintf(line + strlen(line), "%s ", pctbuf);
+        sprintf(line + strlen(line), "%s", p->label);
         if (use_sizes)
             sprintf(line + strlen(line), " %s", sizes);
         if (use_rate)
@@ -508,9 +522,34 @@ static void progress_draw(const progress *p)
     ui_draw(line);
 }
 
+/* finalize the current live line: keep it visible and move to a fresh row.
+ * does not erase the line, so completed phases stay on screen. */
+static void progress_end(void)
+{
+    if (!ui_live || ui_len == 0)
+        return;
+    ui_write("\n", 1);
+    ui_len = 0;
+}
+
+/* force the bar to its final state (100% when the total is known) and then
+ * end the line, leaving the completed bar visible above the next message. */
+static void progress_finish(progress *p)
+{
+    if (!ui_live)
+        return;
+    if (p->total && p->done < p->total)
+        p->done = p->total;
+    g_force_spin = '-';
+    progress_draw(p);
+    g_force_spin = 0;
+    progress_end();
+}
+
 static void progress_begin(progress *p, const char *label, uint64_t total,
                            int bytes)
 {
+    progress_end();
     p->label = label;
     p->total = total;
     p->done = 0;
@@ -2356,21 +2395,46 @@ static char *stage_path(const char *fname, const char *tag)
     return p;
 }
 
+/* Progress callback shared by the native codecs and the tar packer: adopt a
+ * byte total the first time it is known, then feed the common bar. */
+static void stage_progress_cb(unsigned long long done, unsigned long long total,
+                              void *ctx)
+{
+    progress *pg = (progress *)ctx;
+
+    if (pg->total == 0 && total > 0) {
+        pg->total = (uint64_t)total;
+        progress_draw(pg);
+        pg->last = now_ms();
+    }
+    progress_set(pg, (uint64_t)done);
+    if (pg->total && done >= pg->total)
+        progress_set(pg, pg->total);
+}
+
 /* Run the in-process compression backend.  decode=0 compresses src -> dst,
  * decode=1 decompresses.  Only the built-in methods may be selected. */
 static int run_codec(int comp, int level, int threads,
                      const char *src, const char *dst, int decode)
 {
-    (void)level;
-    (void)threads;
+    progress pg;
+    int rc;
+
     if (comp == COMP_NONE)
         return 0;
+    progress_begin(&pg, decode ? "Decompressing" : "Compressing", 0, 1);
     if (comp == COMP_LZMA2)
-        return decode ? benc_lzma2_decode(src, dst)
-                      : benc_lzma2_encode(src, dst, level, threads);
-    if (comp == COMP_ZSTD)
-        return decode ? benc_zstd_decode(src, dst) : benc_zstd_encode(src, dst, level, threads);
-    return fail("unsupported compression method");
+        rc = decode ? benc_lzma2_decode(src, dst, stage_progress_cb, &pg)
+                    : benc_lzma2_encode(src, dst, level, threads,
+                                        stage_progress_cb, &pg);
+    else if (comp == COMP_ZSTD)
+        rc = decode ? benc_zstd_decode(src, dst, stage_progress_cb, &pg)
+                    : benc_zstd_encode(src, dst, level, threads,
+                                       stage_progress_cb, &pg);
+    else
+        rc = fail("unsupported compression method");
+    progress_finish(&pg);
+    return rc;
 }
 
 /* Directory archiving: tar stores the directory itself, so extraction
@@ -2405,14 +2469,16 @@ static int split_dir(const char *path, char *dir, size_t dcap,
     return 0;
 }
 
-static int make_tar(const char *dir, const char *name, const char *dst)
+static int make_tar(const char *dir, const char *name, const char *dst,
+                    benc_tar_progress_fn cb, void *cb_ctx)
 {
-    return benc_tar_create(dir, name, dst);
+    return benc_tar_create(dir, name, dst, cb, cb_ctx);
 }
 
-static int extract_tar(const char *src, const char *dest)
+static int extract_tar(const char *src, const char *dest,
+                       benc_tar_progress_fn cb, void *cb_ctx)
 {
-    return benc_tar_extract(src, dest);
+    return benc_tar_extract(src, dest, cb, cb_ctx);
 }
 
 static int make_directory(const char *path)
@@ -2572,6 +2638,8 @@ static int stage_payload(const char *in_path, const char *out_path,
                          char *namebuf, size_t ncap, char *dirbuf, size_t dcap,
                          char **staged, const char **src, int *archive)
 {
+    progress pg;
+
     *archive = 0;
     if (is_directory(in_path)) {
         if (split_dir(in_path, dirbuf, dcap, namebuf, ncap)) {
@@ -2583,15 +2651,16 @@ static int stage_payload(const char *in_path, const char *out_path,
             fail("cannot create a temporary file next to '%s'", out_path);
             return -1;
         }
-        if (ui_live)
-            ui_draw("Archiving directory");
-        int mrc = make_tar(dirbuf, namebuf, staged[0]);
+        progress_begin(&pg, "Packing", 0, 1);
+        int mrc = make_tar(dirbuf, namebuf, staged[0], stage_progress_cb, &pg);
         if (mrc) {
+            progress_finish(&pg);
             remove(staged[0]);
             free(staged[0]);
             staged[0] = NULL;
             return -1;
         }
+        progress_finish(&pg);
         *src = staged[0];
         *archive = 1;
     } else {
@@ -2608,8 +2677,6 @@ static int stage_payload(const char *in_path, const char *out_path,
             fail("cannot create a temporary file next to '%s'", out_path);
             return -1;
         }
-        if (ui_live)
-            ui_draw("Compressing");
         if (run_codec(comp, level, threads, *src, staged[1], 0)) {
             remove(staged[1]);
             free(staged[1]);
@@ -2710,6 +2777,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
 
     progress_begin(&pg, "Deriving key", 0, 0);
     derive_keys(pw, &h, enc_key, mac_key, &pg);
+    progress_finish(&pg);
     benc_wipe(pw, sizeof pw);
 
     buf = (uint8_t *)malloc(BENC_CHUNK);
@@ -2764,6 +2832,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     }
     if (commit_output(&out, tmp, direct, out_path))
         goto done;
+    progress_finish(&pg);
     report_result(o, "Encrypted", in_path, out_path, done, t0,
                   benc_random_weak ? "  [weak random source]" : "");
     rc = RC_OK;
@@ -2832,6 +2901,7 @@ static int verify_pass(FILE *in, const benc_header *h, const char *canon,
     *cipher_len = ver.total - BENC_TAG_LEN;
     if (h->size_known && h->size != *cipher_len)
         return fail("file is truncated");
+    progress_finish(&pg);
     return RC_OK;
 }
 
@@ -2844,6 +2914,7 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
     char *childp = NULL;
     char child[BENC_MAX_NAME + 2];
     size_t clen;
+    progress pg;
 
     xdir = (char *)malloc(strlen(ram_temp_dir()) + 64);
     if (!xdir) {
@@ -2854,8 +2925,12 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
              ram_temp_dir(), (unsigned)now_ms());
     if (make_directory(xdir))
         goto out;
-    if (extract_tar(tar, xdir))
+    progress_begin(&pg, "Unpacking", 0, 1);
+    if (extract_tar(tar, xdir, stage_progress_cb, &pg)) {
+        progress_finish(&pg);
         goto out;
+    }
+    progress_finish(&pg);
     clen = h->name_len;
     if (clen > BENC_MAX_NAME)
         clen = BENC_MAX_NAME;
@@ -2944,6 +3019,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
             goto done;
         progress_begin(&pg, "Deriving key", 0, 0);
         derive_keys(pw, &h, enc_key, mac_key, &pg);
+        progress_finish(&pg);
         benc_wipe(pw, sizeof pw);
 
         r = verify_pass(in, &h, canon, mac_key, fsize - hdr_end, hdr_end,
@@ -3000,6 +3076,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         fail("file is truncated");
         goto done;
     }
+    progress_finish(&pg);
     if (!post) {
         if (commit_output(&out, tmp, direct, out_path))
             goto done;

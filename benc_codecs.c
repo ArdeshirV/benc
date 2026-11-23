@@ -48,211 +48,989 @@ static int bc_write_file(const char *path, const uint8_t *data, size_t len)
 
 /* ------------------------------------------------------------------ */
 /* Zstd native codec                                                   */
+/*                                                                    */
+/* Self-contained encoder and decoder.  The encoder emits raw blocks   */
+/* and compressed blocks that use the predefined FSE tables            */
+/* with raw literals; the decoder reads that subset, so no libzstd is  */
+/* needed.  Frames are ordinary Zstandard frames and can be read by    */
+/* the reference `zstd` tool.                                          */
 /* ------------------------------------------------------------------ */
 
-#define BC_ZSTD_MAGIC0 0x28
-#define BC_ZSTD_MAGIC1 0xB5
-#define BC_ZSTD_MAGIC2 0x2F
-#define BC_ZSTD_MAGIC3 0xFD
+#define BZ_MAGIC0      0x28u
+#define BZ_MAGIC1      0xB5u
+#define BZ_MAGIC2      0x2Fu
+#define BZ_MAGIC3      0xFDu
+#define BZ_BLOCK_MAX   UINT32_C(131072) /* 128 KiB, the default block max */
+#define BZ_WINDOW      (UINT32_C(1) << 20) /* matches the frame descriptor */
+#define BZ_MIN_MATCH   3u
+#define BZ_MAX_SEQ     0x7EFFu          /* 2-byte sequence count limit   */
+#define BZ_HASH_BITS   16
+#define BZ_HASH_SIZE   (UINT32_C(1) << BZ_HASH_BITS)
+#define BZ_LL_MAX      35
+#define BZ_ML_MAX      52
+#define BZ_OF_MAX      28               /* predefined offset table range */
+#define BZ_LL_LOG      6
+#define BZ_ML_LOG      6
+#define BZ_OF_LOG      5
 
-static size_t bc_zstd_put_block(uint8_t *dst, int last, int type, uint32_t size, const uint8_t *src)
+/* A 16-bit size_t (e.g. ia16 DOS) cannot describe a single object as
+ * large as the encoder tables, so those targets emit raw blocks only.
+ * The decoder is unaffected. */
+#if SIZE_MAX < 131072
+#define BZ_RAW_ONLY 1
+#endif
+
+static const uint8_t bz_ll_bits[BZ_LL_MAX + 1] = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3,
+    4, 6, 7, 8, 9, 10, 11, 12,
+    13, 14, 15, 16
+};
+
+static const uint8_t bz_ml_bits[BZ_ML_MAX + 1] = {
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3,
+    4, 4, 5, 7, 8, 9, 10, 11,
+    12, 13, 14, 15, 16
+};
+
+static const int16_t bz_ll_norm[BZ_LL_MAX + 1] = {
+    4, 3, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2,
+    2, 3, 2, 1, 1, 1, 1, 1,
+    -1, -1, -1, -1
+};
+
+static const int16_t bz_ml_norm[BZ_ML_MAX + 1] = {
+    1, 4, 3, 2, 2, 2, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, -1, -1,
+    -1, -1, -1, -1, -1
+};
+
+static const int16_t bz_of_norm[BZ_OF_MAX + 1] = {
+    1, 1, 1, 1, 1, 1, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    -1, -1, -1, -1, -1
+};
+
+#ifndef BZ_RAW_ONLY
+typedef struct {
+    int32_t  deltaFindState;
+    uint32_t deltaNbBits;
+} bz_sym_tt;
+
+typedef struct {
+    uint32_t table_log;
+    uint32_t max_symbol;
+    uint16_t state_table[64];
+    bz_sym_tt sym_tt[BZ_ML_MAX + 1];
+} bz_ctable;
+#endif
+
+typedef struct {
+    uint16_t next_state;
+    uint8_t  nb_bits;
+    uint8_t  nb_add;
+    uint32_t base;
+} bz_dentry;
+
+typedef struct {
+    uint32_t table_log;
+    bz_dentry table[64];
+} bz_dtable;
+
+#ifndef BZ_RAW_ONLY
+typedef struct {
+    uint32_t litlen;
+    uint32_t matchlen;
+    uint32_t offset;
+} bz_seq;
+
+/* Encoder scratch, allocated once per frame and reused for every block. */
+typedef struct {
+    uint32_t *head;         /* BZ_HASH_SIZE entries */
+    uint32_t *prev;         /* BZ_BLOCK_MAX entries */
+    uint8_t  *lits;         /* BZ_BLOCK_MAX bytes   */
+    bz_seq   *seqs;         /* BZ_MAX_SEQ entries   */
+} bz_scratch;
+#endif
+
+#ifndef BZ_RAW_ONLY
+static bz_ctable bz_ct_ll, bz_ct_ml, bz_ct_of;
+#endif
+static bz_dtable bz_dt_ll, bz_dt_ml, bz_dt_of;
+static uint32_t bz_ll_base[BZ_LL_MAX + 1];
+static uint32_t bz_ml_base[BZ_ML_MAX + 1];
+static uint32_t bz_of_base[BZ_OF_MAX + 1];
+static int bz_ready;
+
+static uint32_t bz_highbit(uint32_t v)
 {
-    {
-        uint32_t v = (uint32_t)((last ? 1 : 0) | ((uint32_t)(type & 3) << 1) | ((uint32_t)size << 3));
-        dst[0] = (uint8_t)(v & 0xFF);
-        dst[1] = (uint8_t)((v >> 8) & 0xFF);
-        dst[2] = (uint8_t)((v >> 16) & 0xFF);
-    }
-    if (type == 1) { /* RLE block: single byte value repeated `size` times */
-        if (src)
-            dst[3] = *src;
-        return 4;
-    }
-    if (src && size > 0)
-        memcpy(dst + 3, src, size);
-    return 3 + (size_t)size;
+    uint32_t r = 0;
+
+    while (v >>= 1)
+        r++;
+    return r;
 }
 
-int benc_zstd_encode(const char *src, const char *dst, int level, int threads)
+#ifndef BZ_RAW_ONLY
+static uint32_t bz_hash3(const uint8_t *p)
 {
-    uint8_t *in;
-    size_t in_len;
-    uint8_t *comp;
-    size_t comp_len;
+    uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                 ((uint32_t)p[2] << 16);
+    return (v * 2654435761u) >> (32 - BZ_HASH_BITS);
+}
+#endif
 
-    (void)level;
-    (void)threads;
-    if (bc_read_file(src, &in, &in_len) != 0)
-        return -1;
-    comp = (uint8_t *)malloc((size_t)(in_len + (uint32_t)in_len / (uint32_t)131072 + 32));
-    if (!comp)
-        return -1;
-    comp[0] = BC_ZSTD_MAGIC0;
-    comp[1] = BC_ZSTD_MAGIC1;
-    comp[2] = BC_ZSTD_MAGIC2;
-    comp[3] = BC_ZSTD_MAGIC3;
-    comp[4] = 0x00;
-    comp[5] = 0x50;
-    comp_len = 6;
-    {
-        size_t off = 0;
-        size_t pos = 6;
-        while (off < in_len) {
-            /* detect a run of identical bytes */
-            uint32_t run = 1;
-            while (off + run < in_len && run < (uint32_t)131072 &&
-                   in[off + run] == in[off])
-                run++;
-            if (run >= 4) {
-                int last = (off + run >= in_len) ? 1 : 0;
-                pos += bc_zstd_put_block(comp + pos, last, 1, run, in + off);
-                off += (size_t)run;
-                continue;
-            }
-            /* raw block */
-            {
-                uint32_t chunk = (uint32_t)(in_len - off);
-                int last = 0;
-                if (chunk > (uint32_t)131072)
-                    chunk = (uint32_t)131072;
-                if (off + (size_t)chunk >= in_len)
-                    last = 1;
-                pos += bc_zstd_put_block(comp + pos, last, 0, chunk, in + off);
-                off += (size_t)chunk;
-            }
+/* ---- FSE tables (predefined distributions) ----------------------- */
+
+#ifndef BZ_RAW_ONLY
+static void bz_ctable_build(bz_ctable *ct, const int16_t *norm,
+                            uint32_t max_symbol, uint32_t table_log)
+{
+    uint32_t table_size = 1u << table_log;
+    uint32_t mask = table_size - 1;
+    uint32_t step = (table_size >> 1) + (table_size >> 3) + 3;
+    uint32_t cumul[BZ_ML_MAX + 2];
+    uint8_t symbols[64];
+    uint32_t high = table_size - 1;
+    uint32_t u, s, position, total = 0;
+
+    ct->table_log = table_log;
+    ct->max_symbol = max_symbol;
+    cumul[0] = 0;
+    for (u = 1; u <= max_symbol + 1; u++) {
+        if (norm[u - 1] == -1) {
+            cumul[u] = cumul[u - 1] + 1;
+            symbols[high--] = (uint8_t)(u - 1);
+        } else {
+            cumul[u] = cumul[u - 1] + (uint32_t)norm[u - 1];
         }
-        if (in_len == 0)
-            comp_len = 6 + (size_t)bc_zstd_put_block(comp + 6, 1, 0, 0, NULL);
+    }
+    position = 0;
+    for (s = 0; s <= max_symbol; s++) {
+        int32_t i, n = norm[s];
+        for (i = 0; i < n; i++) {
+            symbols[position] = (uint8_t)s;
+            position = (position + step) & mask;
+            while (position > high)
+                position = (position + step) & mask;
+        }
+    }
+    for (u = 0; u < table_size; u++)
+        ct->state_table[cumul[symbols[u]]++] = (uint16_t)(table_size + u);
+
+    for (s = 0; s <= max_symbol; s++) {
+        if (norm[s] == 0) {
+            ct->sym_tt[s].deltaNbBits = ((table_log + 1) << 16) - table_size;
+            ct->sym_tt[s].deltaFindState = 0;
+        } else if (norm[s] == -1 || norm[s] == 1) {
+            ct->sym_tt[s].deltaNbBits = (table_log << 16) - table_size;
+            ct->sym_tt[s].deltaFindState = (int32_t)total - 1;
+            total++;
+        } else {
+            uint32_t max_bits = table_log -
+                                bz_highbit((uint32_t)norm[s] - 1u);
+            uint32_t min_state = (uint32_t)norm[s] << max_bits;
+            ct->sym_tt[s].deltaNbBits = (max_bits << 16) - min_state;
+            ct->sym_tt[s].deltaFindState = (int32_t)total - norm[s];
+            total += (uint32_t)norm[s];
+        }
+    }
+}
+
+#endif
+
+static void bz_dtable_build(bz_dtable *dt, const int16_t *norm,
+                            uint32_t max_symbol, uint32_t table_log,
+                            const uint32_t *base, const uint8_t *nb_add)
+{
+    uint32_t table_size = 1u << table_log;
+    uint32_t mask = table_size - 1;
+    uint32_t step = (table_size >> 1) + (table_size >> 3) + 3;
+    uint16_t next[BZ_ML_MAX + 1];
+    uint8_t symbols[64];
+    uint32_t high = table_size - 1;
+    uint32_t position = 0;
+    uint32_t s, u;
+
+    for (s = 0; s <= max_symbol; s++) {
+        next[s] = (uint16_t)(norm[s] == -1 ? 1 : norm[s]);
+        if (norm[s] == -1)
+            symbols[high--] = (uint8_t)s;
+    }
+    for (s = 0; s <= max_symbol; s++) {
+        int32_t i, n = norm[s];
+        for (i = 0; i < n; i++) {
+            symbols[position] = (uint8_t)s;
+            position = (position + step) & mask;
+            while (position > high)
+                position = (position + step) & mask;
+        }
+    }
+    dt->table_log = table_log;
+    for (u = 0; u < table_size; u++) {
+        uint32_t sym = symbols[u];
+        uint32_t ns = next[sym]++;
+        uint32_t bits = table_log - bz_highbit(ns);
+
+        dt->table[u].next_state = (uint16_t)((ns << bits) - table_size);
+        dt->table[u].nb_bits = (uint8_t)bits;
+        dt->table[u].nb_add = nb_add ? nb_add[sym] : (uint8_t)sym;
+        dt->table[u].base = base[sym];
+    }
+}
+
+static void bz_tables_init(void)
+{
+    uint32_t c;
+
+    if (bz_ready)
+        return;
+    bz_ll_base[0] = 0;
+    for (c = 1; c <= BZ_LL_MAX; c++)
+        bz_ll_base[c] = bz_ll_base[c - 1] + (1u << bz_ll_bits[c - 1]);
+    bz_ml_base[0] = 3;
+    for (c = 1; c <= BZ_ML_MAX; c++)
+        bz_ml_base[c] = bz_ml_base[c - 1] + (1u << bz_ml_bits[c - 1]);
+    for (c = 0; c <= BZ_OF_MAX; c++)
+        bz_of_base[c] = 1u << c;
+
+#ifndef BZ_RAW_ONLY
+    bz_ctable_build(&bz_ct_ll, bz_ll_norm, BZ_LL_MAX, BZ_LL_LOG);
+    bz_ctable_build(&bz_ct_ml, bz_ml_norm, BZ_ML_MAX, BZ_ML_LOG);
+    bz_ctable_build(&bz_ct_of, bz_of_norm, BZ_OF_MAX, BZ_OF_LOG);
+#endif
+    bz_dtable_build(&bz_dt_ll, bz_ll_norm, BZ_LL_MAX, BZ_LL_LOG,
+                    bz_ll_base, bz_ll_bits);
+    bz_dtable_build(&bz_dt_ml, bz_ml_norm, BZ_ML_MAX, BZ_ML_LOG,
+                    bz_ml_base, bz_ml_bits);
+    bz_dtable_build(&bz_dt_of, bz_of_norm, BZ_OF_MAX, BZ_OF_LOG,
+                    bz_of_base, NULL);
+    bz_ready = 1;
+}
+
+/* ---- bit stream -------------------------------------------------- */
+
+#ifndef BZ_RAW_ONLY
+typedef struct {
+    uint32_t acc;
+    unsigned nbits;
+    uint8_t *buf;
+    size_t   cap;
+    size_t   pos;
+    int      err;
+} bz_bw;
+#endif
+
+typedef struct {
+    const uint8_t *buf;
+    long bit;
+    int err;
+} bz_br;
+
+#ifndef BZ_RAW_ONLY
+static void bz_bw_flush(bz_bw *w)
+{
+    while (w->nbits >= 8) {
+        if (w->pos < w->cap)
+            w->buf[w->pos] = (uint8_t)(w->acc & 0xFFu);
         else
-            comp_len = pos;
+            w->err = 1;
+        w->pos++;
+        w->acc >>= 8;
+        w->nbits -= 8;
     }
-    if (bc_write_file(dst, comp, comp_len) != 0) {
-        free(comp);
-        free(in);
+}
+
+/* Callers pass at most 16 bits while the accumulator holds fewer than 8
+ * pending bits, so it never overflows. */
+static void bz_bw_put(bz_bw *w, uint32_t v, unsigned n)
+{
+    if (n == 0)
+        return;
+    w->acc |= (v & ((1u << n) - 1u)) << w->nbits;
+    w->nbits += n;
+    bz_bw_flush(w);
+}
+
+static size_t bz_bw_close(bz_bw *w)
+{
+    bz_bw_put(w, 1, 1);             /* end marker */
+    if (w->nbits > 0) {
+        if (w->pos < w->cap)
+            w->buf[w->pos] = (uint8_t)(w->acc & 0xFFu);
+        else
+            w->err = 1;
+        w->pos++;
+        w->nbits = 0;
+    }
+    return w->err ? 0 : w->pos;
+}
+
+#endif
+
+static int bz_br_init(bz_br *r, const uint8_t *buf, size_t len)
+{
+    unsigned last, hb;
+
+    if (len == 0)
         return -1;
-    }
-    free(comp);
-    free(in);
+    last = buf[len - 1];
+    if (last == 0)
+        return -1;
+    hb = 7;
+    while (!((last >> hb) & 1u))
+        hb--;
+    r->buf = buf;
+    r->bit = (long)len * 8 - 8 + (long)hb - 1;
+    r->err = 0;
     return 0;
 }
 
-int benc_zstd_decode(const char *src, const char *dst)
+static uint32_t bz_br_get(bz_br *r, unsigned n)
 {
-    uint8_t *in;
-    size_t in_len;
-    uint8_t *out;
-    uint32_t out_cap = 0;
-    size_t out_len = 0;
-    size_t off = 0;
-    int last = 0;
-    int type = 0;
-    uint32_t size = 0;
+    uint32_t v = 0;
 
+    while (n--) {
+        if (r->bit < 0) {
+            r->err = 1;
+            return 0;
+        }
+        v = (v << 1) | ((r->buf[r->bit >> 3] >> (r->bit & 7)) & 1u);
+        r->bit--;
+    }
+    return v;
+}
+
+/* ---- FSE state encode/decode ------------------------------------- */
+
+#ifndef BZ_RAW_ONLY
+typedef struct {
+    uint32_t value;
+    const bz_ctable *ct;
+} bz_cstate;
+
+static void bz_cstate_init(bz_cstate *st, const bz_ctable *ct,
+                           uint32_t symbol)
+{
+    const bz_sym_tt *tt = &ct->sym_tt[symbol];
+    uint32_t nb = (tt->deltaNbBits + (1u << 15)) >> 16;
+    uint32_t v = (nb << 16) - tt->deltaNbBits;
+
+    st->ct = ct;
+    st->value = ct->state_table[(int32_t)(v >> nb) + tt->deltaFindState];
+}
+
+static void bz_cstate_encode(bz_bw *w, bz_cstate *st, uint32_t symbol)
+{
+    const bz_sym_tt *tt = &st->ct->sym_tt[symbol];
+    uint32_t nb = (st->value + tt->deltaNbBits) >> 16;
+    int32_t idx = (int32_t)(st->value >> nb) + tt->deltaFindState;
+
+    bz_bw_put(w, st->value, nb);
+    st->value = st->ct->state_table[idx];
+}
+
+static void bz_cstate_flush(bz_bw *w, const bz_cstate *st)
+{
+    bz_bw_put(w, st->value, st->ct->table_log);
+}
+
+/* ---- encoder ----------------------------------------------------- */
+
+#endif /* !BZ_RAW_ONLY */
+
+#ifndef BZ_RAW_ONLY
+static int bz_ll_code(uint32_t v)
+{
+    int c = 0;
+
+    while (c < BZ_LL_MAX && v >= bz_ll_base[c + 1])
+        c++;
+    return c;
+}
+
+static int bz_ml_code(uint32_t v)
+{
+    int c = 0;
+
+    while (c < BZ_ML_MAX && v >= bz_ml_base[c + 1])
+        c++;
+    return c;
+}
+
+/* Allocate the encoder scratch pool.  Returns NULL when memory is short,
+ * in which case the caller stores every block raw. */
+static uint8_t *bz_scratch_alloc(bz_scratch *sc)
+{
+    unsigned long total = (unsigned long)BZ_HASH_SIZE * sizeof(uint32_t) +
+                          (unsigned long)BZ_BLOCK_MAX * sizeof(uint32_t) +
+                          (unsigned long)BZ_BLOCK_MAX +
+                          (unsigned long)BZ_MAX_SEQ * sizeof(bz_seq);
+    uint8_t *arena;
+
+    /* A 16-bit size_t cannot describe the pool: store every block raw. */
+    if (total > (unsigned long)(size_t)-1)
+        return NULL;
+    arena = (uint8_t *)malloc((size_t)total);
+    if (!arena)
+        return NULL;
+    sc->head = (uint32_t *)arena;
+    sc->prev = sc->head + BZ_HASH_SIZE;
+    sc->lits = (uint8_t *)(sc->prev + BZ_BLOCK_MAX);
+    sc->seqs = (bz_seq *)(sc->lits + BZ_BLOCK_MAX);
+    return arena;
+}
+
+/* Parse one block into literals + sequences.  Returns the literal byte
+ * count. */
+static size_t bz_parse_block(const uint8_t *in, size_t len, int level,
+                             bz_scratch *sc, size_t *nbseq)
+{
+    uint32_t *head = sc->head;
+    uint32_t *prev = sc->prev;
+    uint8_t *lits = sc->lits;
+    bz_seq *seqs = sc->seqs;
+    size_t i = 0, lit_start = 0, lit_pos = 0, n = 0;
+    int chain = 8 + level * 16;
+    int nice = 48 + level * 32;
+    uint32_t h;
+
+    if (chain > 256)
+        chain = 256;
+    if (nice > 1024)
+        nice = 1024;
+    for (h = 0; h < BZ_HASH_SIZE; h++)
+        head[h] = 0xFFFFFFFFu;
+
+    while (i + BZ_MIN_MATCH <= len && n < BZ_MAX_SEQ) {
+        uint32_t cand;
+        uint32_t best_len = 0, best_off = 0;
+        int tries = chain;
+
+        h = bz_hash3(in + i);
+        cand = head[h];
+        prev[i] = cand;
+        head[h] = (uint32_t)i;
+
+        while (cand != 0xFFFFFFFFu && tries-- > 0) {
+            size_t dist = i - cand;
+            size_t maxl = len - i;
+            size_t l = 0;
+
+            while (l < maxl && in[cand + l] == in[i + l])
+                l++;
+            if (l > best_len) {
+                best_len = (uint32_t)l;
+                best_off = (uint32_t)dist;
+                if (l >= (size_t)nice)
+                    break;
+            }
+            if (cand == 0)
+                break;
+            cand = prev[cand];
+        }
+
+        if (best_len >= BZ_MIN_MATCH && best_off <= BZ_WINDOW) {
+            uint32_t k;
+
+            seqs[n].litlen = (uint32_t)(i - lit_start);
+            seqs[n].matchlen = best_len;
+            seqs[n].offset = best_off;
+            n++;
+            memcpy(lits + lit_pos, in + lit_start, i - lit_start);
+            lit_pos += i - lit_start;
+            for (k = 1; k < best_len && i + k + BZ_MIN_MATCH <= len; k++) {
+                uint32_t h2 = bz_hash3(in + i + k);
+                prev[i + k] = head[h2];
+                head[h2] = (uint32_t)(i + k);
+            }
+            i += best_len;
+            lit_start = i;
+        } else {
+            i++;
+        }
+    }
+    memcpy(lits + lit_pos, in + lit_start, len - lit_start);
+    lit_pos += len - lit_start;
+    *nbseq = n;
+    return lit_pos;
+}
+
+static void bz_put_literals_header(uint8_t *out, size_t lit_len,
+                                   size_t *hdr_len)
+{
+    if (lit_len <= 31) {
+        out[0] = (uint8_t)(lit_len << 3);
+        *hdr_len = 1;
+    } else if (lit_len <= 4095) {
+        uint32_t v = ((uint32_t)lit_len << 4) | (1u << 2);
+        out[0] = (uint8_t)(v & 0xFFu);
+        out[1] = (uint8_t)(v >> 8);
+        *hdr_len = 2;
+    } else {
+        uint32_t v = ((uint32_t)lit_len << 4) | (3u << 2);
+        out[0] = (uint8_t)(v & 0xFFu);
+        out[1] = (uint8_t)((v >> 8) & 0xFFu);
+        out[2] = (uint8_t)((v >> 16) & 0xFFu);
+        *hdr_len = 3;
+    }
+}
+
+/* Encode one block.  Returns the compressed size, or 0 when the block is
+ * not worth compressing (the caller then emits a raw block).  The output
+ * buffer is only valid when the return value is nonzero. */
+static size_t bz_encode_block(bz_scratch *sc, const uint8_t *in, size_t len,
+                              int level, uint8_t *out, size_t out_cap)
+{
+    bz_seq *seqs = sc->seqs;
+    size_t nbseq = 0, lit_len, lh, total, bits, n;
+    bz_bw w;
+    bz_cstate st_ll, st_ml, st_of;
+
+    lit_len = bz_parse_block(in, len, level, sc, &nbseq);
+    if (nbseq == 0)
+        return 0;
+
+    bz_put_literals_header(out, lit_len, &lh);
+    if (lh + lit_len + 8 > out_cap)
+        return 0;
+    memcpy(out + lh, sc->lits, lit_len);
+
+    total = lh + lit_len;
+    if (nbseq < 128) {
+        out[total++] = (uint8_t)nbseq;
+    } else {
+        out[total++] = (uint8_t)(0x80u | (nbseq >> 8));
+        out[total++] = (uint8_t)(nbseq & 0xFFu);
+    }
+    out[total++] = 0x00;            /* all three tables predefined */
+
+    w.acc = 0;
+    w.nbits = 0;
+    w.buf = out + total;
+    w.cap = out_cap - total;
+    w.pos = 0;
+    w.err = 0;
+
+    {
+        bz_seq *s = &seqs[nbseq - 1];
+        int llc = bz_ll_code(s->litlen);
+        int mlc = bz_ml_code(s->matchlen);
+        uint32_t ofv = s->offset + 3u;
+        int ofc = (int)bz_highbit(ofv);
+
+        bz_cstate_init(&st_ml, &bz_ct_ml, (uint32_t)mlc);
+        bz_cstate_init(&st_of, &bz_ct_of, (uint32_t)ofc);
+        bz_cstate_init(&st_ll, &bz_ct_ll, (uint32_t)llc);
+        bz_bw_put(&w, s->litlen - bz_ll_base[llc], bz_ll_bits[llc]);
+        bz_bw_put(&w, s->matchlen - bz_ml_base[mlc], bz_ml_bits[mlc]);
+        bz_bw_put(&w, ofv - bz_of_base[ofc], (unsigned)ofc);
+    }
+    for (n = nbseq - 1; n-- > 0;) {
+        bz_seq *s = &seqs[n];
+        int llc = bz_ll_code(s->litlen);
+        int mlc = bz_ml_code(s->matchlen);
+        uint32_t ofv = s->offset + 3u;
+        int ofc = (int)bz_highbit(ofv);
+
+        bz_cstate_encode(&w, &st_of, (uint32_t)ofc);
+        bz_cstate_encode(&w, &st_ml, (uint32_t)mlc);
+        bz_cstate_encode(&w, &st_ll, (uint32_t)llc);
+        bz_bw_put(&w, s->litlen - bz_ll_base[llc], bz_ll_bits[llc]);
+        bz_bw_put(&w, s->matchlen - bz_ml_base[mlc], bz_ml_bits[mlc]);
+        bz_bw_put(&w, ofv - bz_of_base[ofc], (unsigned)ofc);
+    }
+    bz_cstate_flush(&w, &st_ml);
+    bz_cstate_flush(&w, &st_of);
+    bz_cstate_flush(&w, &st_ll);
+    bits = bz_bw_close(&w);
+    if (bits == 0)
+        return 0;
+    total += bits;
+    return total < len ? total : 0;
+}
+
+#endif /* !BZ_RAW_ONLY */
+
+int benc_zstd_encode(const char *src, const char *dst, int level, int threads,
+                     benc_progress_fn cb, void *cb_ctx)
+{
+    uint8_t *in = NULL, *out = NULL, *arena = NULL;
+#ifndef BZ_RAW_ONLY
+    bz_scratch sc;
+#endif
+    size_t in_len = 0, out_cap, pos = 0, op = 0;
+    int rc = -1;
+
+    (void)threads;
+#ifdef BZ_RAW_ONLY
+    (void)level;
+#endif
     if (bc_read_file(src, &in, &in_len) != 0)
         return -1;
-    if (in_len < 5 || in[0] != BC_ZSTD_MAGIC0 || in[1] != BC_ZSTD_MAGIC1 || in[2] != BC_ZSTD_MAGIC2 || in[3] != BC_ZSTD_MAGIC3)
-        return -1;
+    if (cb)
+        cb(0, (unsigned long long)in_len, cb_ctx);
+    bz_tables_init();
+
     {
-        uint32_t fhd = in[4];
-        int fcs_flag = (int)((fhd >> 6) & 3);
-        int single = (int)((fhd >> 5) & 1);
-        int did_flag = (int)(fhd & 3);
-        uint32_t fcs_size = 0;
-        size_t did_size = 0;
-        if (fcs_flag == 0)
-            fcs_size = single ? 1u : 0u;
-        else if (fcs_flag == 1)
-            fcs_size = 2;
-        else if (fcs_flag == 2)
-            fcs_size = 4;
-        else
-            fcs_size = 8;
-        if (did_flag == 0)
-            did_size = 0;
-        else if (did_flag == 1)
-            did_size = 1;
-        else if (did_flag == 2)
-            did_size = 2;
-        else
-            did_size = 4;
-        off = 5 + (single ? 0u : 1u) + did_size + fcs_size;
-        if (fcs_size > 0) {
-            uint32_t fcs = 0;
-            int i;
-            if (fcs_size == 1) {
-                fcs = in[5];
-            } else if (fcs_size == 2) {
-                fcs = (uint32_t)in[5] | ((uint32_t)in[6] << 8);
-                fcs = fcs + 256;
-            } else if (fcs_size == 4) {
-                fcs = 0;
-                for (i = 0; i < 4; i++)
-                    fcs |= ((uint32_t)in[5 + i]) << (8 * i);
-            } else {
-                uint64_t f = 0;
-                int j;
-                for (j = 0; j < 8; j++)
-                    f |= ((uint64_t)in[5 + j]) << (8 * j);
-                fcs = (uint32_t)f;
-            }
-            out_cap = fcs;
-        }
+        unsigned long cap = (unsigned long)in_len +
+                            ((unsigned long)in_len / BZ_BLOCK_MAX + 2) * 3 + 16;
+
+        if (cap > (unsigned long)(size_t)-1)
+            goto out;
+        out_cap = (size_t)cap;
     }
-    {
-        size_t out_alloc = 4096;
-        out = (uint8_t *)malloc(out_alloc);
-        if (!out)
-            return -1;
-        for (;;) {
-        uint32_t b0 = in[off];
-        uint32_t b1 = in[off + 1];
-        uint32_t b2 = in[off + 2];
-        uint32_t v = b0 | ((uint32_t)b1 << 8) | ((uint32_t)b2 << 16);
-        last = (v & 1) ? 1 : 0;
-        type = (int)((v >> 1) & 3);
-        size = v >> 3;
-        off += 3;
-        if ((size_t)out_len + (size_t)size > out_alloc) {
-            size_t nalloc = ((size_t)out_len + (size_t)size) * 2;
-            uint8_t *nout = (uint8_t *)realloc(out, nalloc);
-            if (!nout) {
-                free(out);
-                return -1;
-            }
-            out = nout;
-            out_alloc = nalloc;
-        }
-        if (type == 0) {
-            uint32_t i;
-            for (i = 0; i < size; i++)
-                out[out_len++] = in[off++];
-        } else if (type == 1) {
-            uint8_t b = in[off];
-            uint32_t i;
-            for (i = 0; i < size; i++)
-                out[out_len++] = b;
-            off += 1;
-        } else if (type == 2) {
-            if (out_len + size > out_cap)
-                return -1;
-            memcpy(out + out_len, in + off, size);
-            out_len += size;
-            off += size;
+    out = (uint8_t *)malloc(out_cap);
+    if (!out)
+        goto out;
+#ifndef BZ_RAW_ONLY
+    /* When the scratch pool cannot be allocated every block is stored raw. */
+    arena = bz_scratch_alloc(&sc);
+#endif
+
+    out[op++] = BZ_MAGIC0;
+    out[op++] = BZ_MAGIC1;
+    out[op++] = BZ_MAGIC2;
+    out[op++] = BZ_MAGIC3;
+    out[op++] = 0x00;               /* no content size, no checksum */
+    out[op++] = 0x50;               /* 1 MiB window */
+
+    do {
+        unsigned long lim = (unsigned long)(in_len - pos);
+        size_t chunk;
+        int last;
+        size_t csize = 0;
+
+        if (lim > BZ_BLOCK_MAX)
+            lim = BZ_BLOCK_MAX;
+        chunk = (size_t)lim;
+        last = (pos + chunk >= in_len) ? 1 : 0;
+#ifndef BZ_RAW_ONLY
+        if (arena && chunk >= 8)
+            csize = bz_encode_block(&sc, in + pos, chunk, level,
+                                    out + op + 3, out_cap - op - 3);
+#endif
+        if (csize > 0) {
+            uint32_t hdr = (uint32_t)last | (2u << 1) |
+                           ((uint32_t)csize << 3);
+            out[op++] = (uint8_t)(hdr & 0xFFu);
+            out[op++] = (uint8_t)((hdr >> 8) & 0xFFu);
+            out[op++] = (uint8_t)((hdr >> 16) & 0xFFu);
+            op += csize;
         } else {
-            return -1;
+            uint32_t hdr = (uint32_t)last | ((uint32_t)chunk << 3);
+            out[op++] = (uint8_t)(hdr & 0xFFu);
+            out[op++] = (uint8_t)((hdr >> 8) & 0xFFu);
+            out[op++] = (uint8_t)((hdr >> 16) & 0xFFu);
+            memcpy(out + op, in + pos, chunk);
+            op += chunk;
         }
-        if (last)
-            break;
-        }
-    }
-    if (bc_write_file(dst, out, out_len) != 0) {
-        free(out);
-        free(in);
-        return -1;
-    }
+        pos += chunk;
+        if (cb)
+            cb((unsigned long long)pos, (unsigned long long)in_len, cb_ctx);
+    } while (pos < in_len);
+
+    if (bc_write_file(dst, out, op) != 0)
+        goto out;
+    rc = 0;
+out:
     free(out);
     free(in);
+    free(arena);
+    return rc;
+}
+
+/* ---- decoder ----------------------------------------------------- */
+
+static int bz_grow(uint8_t **buf, size_t *cap, size_t need)
+{
+    size_t nc;
+    uint8_t *nb;
+
+    if (need <= *cap)
+        return 0;
+    nc = *cap ? *cap : 4096;
+    while (nc < need) {
+        if (nc > (size_t)-1 / 2)
+            return -1;
+        nc *= 2;
+    }
+    nb = (uint8_t *)realloc(*buf, nc);
+    if (!nb)
+        return -1;
+    *buf = nb;
+    *cap = nc;
     return 0;
+}
+
+static int bz_decode_block(const uint8_t *src, size_t src_len,
+                           uint8_t *dst, size_t dst_cap, size_t *produced)
+{
+    size_t p = 0, lit_size, lit_len, op = 0, nbseq;
+    const uint8_t *lits;
+    bz_br br;
+    uint32_t st_ll, st_ml, st_of;
+    size_t seq;
+
+    /* Literal counts and match offsets in a compressed block exceed a
+     * 16-bit size_t, so such targets decode raw and RLE frames only. */
+    if (sizeof(size_t) < 4)
+        return -1;
+    if (src_len < 4)
+        return -1;
+
+    {
+        unsigned type = src[0] & 3u;
+        unsigned lhl = (src[0] >> 2) & 3u;
+
+        if (type == 2 || type == 3)
+            return -1;
+        if (lhl == 0 || lhl == 2) {
+            p = 1;
+            lit_size = (size_t)src[0] >> 3;
+        } else if (lhl == 1) {
+            if (src_len < 2)
+                return -1;
+            p = 2;
+            lit_size = ((size_t)src[0] | ((size_t)src[1] << 8)) >> 4;
+        } else {
+            uint32_t v;
+
+            if (src_len < 3)
+                return -1;
+            p = 3;
+            v = ((uint32_t)src[0] | ((uint32_t)src[1] << 8) |
+                 ((uint32_t)src[2] << 16)) >> 4;
+            if (v > (uint32_t)(size_t)-1)
+                return -1;
+            lit_size = (size_t)v;
+        }
+        if (type == 1) {
+            if (p >= src_len)
+                return -1;
+            lits = src + p;
+            lit_len = 1;
+            p += 1;
+        } else {
+            if (p + lit_size > src_len)
+                return -1;
+            lits = src + p;
+            lit_len = lit_size;
+            p += lit_size;
+        }
+        if (lit_size > dst_cap)
+            return -1;
+    }
+
+    if (p >= src_len)
+        return -1;
+    nbseq = src[p++];
+    if (nbseq >= 128) {
+        if (nbseq == 255) {
+            if (p + 2 > src_len)
+                return -1;
+            nbseq = 0x7F00u + (size_t)src[p] +
+                    ((size_t)src[p + 1] << 8);
+            p += 2;
+        } else {
+            if (p >= src_len)
+                return -1;
+            nbseq = ((nbseq - 128) << 8) + src[p++];
+        }
+    }
+    if (nbseq == 0) {
+        size_t i;
+
+        if (lit_len == 1) {
+            memset(dst, lits[0], lit_size);
+        } else {
+            for (i = 0; i < lit_size; i++)
+                dst[i] = lits[i];
+        }
+        *produced = lit_size;
+        return 0;
+    }
+
+    if (p >= src_len)
+        return -1;
+    if (src[p++] != 0x00)           /* predefined tables only */
+        return -1;
+    if (bz_br_init(&br, src + p, src_len - p) != 0)
+        return -1;
+
+    st_ll = bz_br_get(&br, bz_dt_ll.table_log);
+    st_of = bz_br_get(&br, bz_dt_of.table_log);
+    st_ml = bz_br_get(&br, bz_dt_ml.table_log);
+
+    {
+        size_t lp = 0;
+
+        for (seq = 0; seq < nbseq; seq++) {
+            bz_dentry le = bz_dt_ll.table[st_ll & 63u];
+            bz_dentry me = bz_dt_ml.table[st_ml & 63u];
+            bz_dentry oe = bz_dt_of.table[st_of & 31u];
+            uint32_t ofv, ml, ll, k;
+
+            ofv = oe.base + bz_br_get(&br, oe.nb_add);
+            ml = me.base + bz_br_get(&br, me.nb_add);
+            ll = le.base + bz_br_get(&br, le.nb_add);
+            if (br.err || ofv <= 3)
+                return -1;
+            {
+                size_t offset = (size_t)(ofv - 3u);
+
+                if (lp > lit_size || ll > lit_size - lp)
+                    return -1;
+                if (op + ll + ml > dst_cap)
+                    return -1;
+                if (lit_len == 1) {
+                    for (k = 0; k < ll; k++)
+                        dst[op++] = lits[0];
+                } else {
+                    for (k = 0; k < ll; k++)
+                        dst[op++] = lits[lp++];
+                }
+                if (offset > op)
+                    return -1;
+                for (k = 0; k < ml; k++) {
+                    dst[op] = dst[op - offset];
+                    op++;
+                }
+            }
+            if (seq + 1 < nbseq) {
+                st_ll = le.next_state + bz_br_get(&br, le.nb_bits);
+                st_ml = me.next_state + bz_br_get(&br, me.nb_bits);
+                st_of = oe.next_state + bz_br_get(&br, oe.nb_bits);
+                if (br.err)
+                    return -1;
+            }
+        }
+        while (lp < lit_size) {
+            if (op >= dst_cap)
+                return -1;
+            dst[op++] = (lit_len == 1) ? lits[0] : lits[lp];
+            lp++;
+        }
+    }
+    *produced = op;
+    return 0;
+}
+
+int benc_zstd_decode(const char *src, const char *dst,
+                     benc_progress_fn cb, void *cb_ctx)
+{
+    uint8_t *in = NULL, *out = NULL;
+    size_t in_len = 0, out_cap = 0, op = 0, p;
+    int rc = -1, checksum;
+
+    if (bc_read_file(src, &in, &in_len) != 0)
+        return -1;
+    if (cb)
+        cb(0, (unsigned long long)in_len, cb_ctx);
+    bz_tables_init();
+
+    if (in_len < 6 || in[0] != BZ_MAGIC0 || in[1] != BZ_MAGIC1 ||
+        in[2] != BZ_MAGIC2 || in[3] != BZ_MAGIC3)
+        goto out;
+
+    p = 4;
+    {
+        unsigned fhd = in[p++];
+        unsigned fcs_flag = (fhd >> 6) & 3u;
+        unsigned single = (fhd >> 5) & 1u;
+        unsigned did = fhd & 3u;
+        size_t fcs_size, did_size;
+
+        if (fhd & 0x08u)
+            goto out;
+        checksum = (int)((fhd >> 2) & 1u);
+        if (!single) {
+            if (p >= in_len)
+                goto out;
+            p++;
+        }
+        did_size = did == 0 ? 0 : did == 1 ? 1 : did == 2 ? 2 : 4;
+        fcs_size = fcs_flag == 0 ? (single ? 1u : 0u)
+                 : fcs_flag == 1 ? 2u : fcs_flag == 2 ? 4u : 8u;
+        p += did_size + fcs_size;
+        if (p > in_len)
+            goto out;
+    }
+
+    for (;;) {
+        uint32_t hdr, size, type;
+        int last;
+
+        if (p + 3 > in_len)
+            goto out;
+        hdr = (uint32_t)in[p] | ((uint32_t)in[p + 1] << 8) |
+              ((uint32_t)in[p + 2] << 16);
+        p += 3;
+        last = (int)(hdr & 1u);
+        type = (hdr >> 1) & 3u;
+        size = hdr >> 3;
+        if (type == 3 || size > BZ_BLOCK_MAX)
+            goto out;
+
+        if (type == 0) {
+            if (size > in_len - p || size > (size_t)-1 - op)
+                goto out;
+            if (bz_grow(&out, &out_cap, op + size) != 0)
+                goto out;
+            memcpy(out + op, in + p, size);
+            op += size;
+            p += size;
+        } else if (type == 1) {
+            if (p >= in_len || size > (size_t)-1 - op)
+                goto out;
+            if (bz_grow(&out, &out_cap, op + size) != 0)
+                goto out;
+            memset(out + op, in[p], size);
+            op += size;
+            p += 1;
+        } else {
+            size_t produced = 0;
+
+            if (p + size > in_len)
+                goto out;
+            if (bz_grow(&out, &out_cap, op + BZ_BLOCK_MAX) != 0)
+                goto out;
+            if (bz_decode_block(in + p, size, out + op,
+                                out_cap - op, &produced) != 0)
+                goto out;
+            op += produced;
+            p += size;
+        }
+        if (cb)
+            cb((unsigned long long)p, (unsigned long long)in_len, cb_ctx);
+        if (last)
+            break;
+    }
+
+    if (checksum) {
+        if (p + 4 > in_len)
+            goto out;
+        p += 4;
+    }
+    if (bc_write_file(dst, out, op) != 0)
+        goto out;
+    rc = 0;
+out:
+    free(out);
+    free(in);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -267,7 +1045,7 @@ int benc_zstd_decode(const char *src, const char *dst)
 #define LZMA_NUM_LIT_STATES 7
 #define LZMA_NUM_POS_BITS 4
 #define LZMA_NUM_POS_STATES (1u << LZMA_NUM_POS_BITS)
-#define LZMA_NUM_POS_MASK (LZMA_NUM_POS_STATES - 1u)
+#define LZMA_NUM_POS_MASK ((uint32_t)((1u << LZMA_PB) - 1u))
 #define LZMA_NUM_LEN_TO_POS_STATES 4
 #define LZMA_NUM_POS_SLOT_BITS 6
 #define LZMA_START_POS_MODEL_INDEX 4
@@ -290,7 +1068,6 @@ int benc_zstd_decode(const char *src, const char *dst)
 #define LZMA_HASH_SIZE (UINT32_C(1) << LZMA_HASH_BITS)
 #define LZMA_HASH_MASK (LZMA_HASH_SIZE - 1u)
 #define LZMA_CHUNK_MAX UINT32_C(65536)
-#define LZMA_MAX_CHAIN 64
 
 typedef struct {
     uint16_t choice;
@@ -308,7 +1085,7 @@ typedef struct {
     uint16_t is_rep_g2[LZMA_NUM_STATES];
     uint16_t is_rep0_long[LZMA_NUM_STATES * LZMA_NUM_POS_STATES];
     uint16_t pos_slot[LZMA_NUM_LEN_TO_POS_STATES][1u << LZMA_NUM_POS_SLOT_BITS];
-    uint16_t spec_pos[LZMA_NUM_FULL_DISTANCES - LZMA_END_POS_MODEL_INDEX];
+    uint16_t spec_pos[LZMA_NUM_FULL_DISTANCES];
     uint16_t align[LZMA_ALIGN_SIZE];
     lzma_len_probs match_len;
     lzma_len_probs rep_len;
@@ -545,8 +1322,7 @@ static void lzma_encode_dist(lzma_rc_enc *rc, lzma_probs *p, uint32_t dist0,
         uint32_t base = (2u | (slot & 1u)) << num_direct;
         uint32_t rem = dist0 - base;
         if (slot < LZMA_END_POS_MODEL_INDEX) {
-            rc_enc_bit_tree_reverse(rc, p->spec_pos +
-                                    (size_t)(base - slot - 1), num_direct, rem);
+            rc_enc_bit_tree_reverse(rc, p->spec_pos + base, num_direct, rem);
         } else {
             rc_enc_direct(rc, rem >> LZMA_NUM_ALIGN_BITS,
                           num_direct - LZMA_NUM_ALIGN_BITS);
@@ -565,6 +1341,32 @@ typedef struct {
     uint32_t *prev;   /* ring of size LZMA_WINDOW */
 } lzma_matcher;
 
+/* Encoder effort knobs derived from the compression level (preset 0..9).
+ *   chain_depth : max candidates examined per position in the hash chain
+ *   nice_len    : stop the chain search once a match reaches this length
+ * Higher levels search deeper and stop later, buying ratio at the cost of
+ * speed.  This mirrors xz's level->effort mapping closely enough to be
+ * useful while staying tiny (no runtime tables to initialise). */
+typedef struct {
+    uint32_t chain_depth;
+    uint32_t nice_len;
+} lzma_opts;
+
+static void lzma_opts_from_level(int level, lzma_opts *o)
+{
+    static const uint32_t depth_tab[10] =
+        { 4u, 8u, 16u, 32u, 48u, 64u, 128u, 256u, 512u, 1024u };
+    static const uint32_t nice_tab[10] =
+        { 16u, 24u, 32u, 48u, 64u, 96u, 128u, 192u, 256u, 273u };
+
+    if (level < 0)
+        level = 6;          /* benc's LZMA2 default */
+    if (level > 9)
+        level = 9;
+    o->chain_depth = depth_tab[level];
+    o->nice_len = nice_tab[level];
+}
+
 static uint32_t lzma_hash(const uint8_t *p)
 {
     uint32_t h = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -576,9 +1378,21 @@ static uint32_t lzma_hash(const uint8_t *p)
 /* LZMA encode one range-coded chunk [start,end)                      */
 /* ------------------------------------------------------------------ */
 
+/* The window is unreachable when size_t cannot hold its size. */
+static uint32_t lzma_min_pos(size_t pos)
+{
+#if SIZE_MAX > LZMA_WINDOW
+    if ((unsigned long)pos > LZMA_WINDOW)
+        return (uint32_t)(pos - LZMA_WINDOW);
+#else
+    (void)pos;
+#endif
+    return 0;
+}
+
 static void lzma_encode_range(const uint8_t *in, size_t start, size_t end,
                               lzma_matcher *m, lzma_probs *p,
-                              lzma_rc_enc *rc)
+                              lzma_rc_enc *rc, const lzma_opts *opts)
 {
     int state = 0;
     uint32_t reps[4] = { 1u, 1u, 1u, 1u };
@@ -620,9 +1434,8 @@ static void lzma_encode_range(const uint8_t *in, size_t start, size_t end,
         if (max_len >= LZMA_MATCH_MIN_LEN && pos + 4 <= end) {
             uint32_t cand = m->head[lzma_hash(in + pos)];
             uint32_t chain = 0;
-            uint32_t min_pos =
-                pos > LZMA_WINDOW ? (uint32_t)(pos - LZMA_WINDOW) : 0;
-            while (cand != 0xFFFFFFFFu && chain < LZMA_MAX_CHAIN) {
+            uint32_t min_pos = lzma_min_pos(pos);
+            while (cand != 0xFFFFFFFFu && chain < opts->chain_depth) {
                 uint32_t d;
                 if (cand < min_pos)
                     break;
@@ -641,6 +1454,9 @@ static void lzma_encode_range(const uint8_t *in, size_t start, size_t end,
                 }
                 cand = m->prev[cand & LZMA_WINDOW_MASK];
                 chain++;
+                /* good-enough match: stop searching, save time */
+                if (best_len >= opts->nice_len)
+                    break;
             }
         }
 
@@ -684,7 +1500,7 @@ static void lzma_encode_range(const uint8_t *in, size_t start, size_t end,
             state = lzma_state_rep(state);
             pos += rep_best_len;
         } else {
-            uint8_t prev = pos > start ? in[pos - 1] : 0;
+            uint8_t prev = pos > 0 ? in[pos - 1] : 0;
             uint8_t match_byte = 0;
             if (state >= LZMA_NUM_LIT_STATES)
                 match_byte = in[pos - reps[0]];
@@ -754,11 +1570,13 @@ static uint32_t rc_dec_direct(lzma_rc_dec *rc, int nbits)
     uint32_t res = 0;
     int i;
     for (i = 0; i < nbits; i++) {
+        uint32_t bit = 0;
         rc->range >>= 1;
         if (rc->code >= rc->range) {
             rc->code -= rc->range;
-            res |= 1u << i;
+            bit = 1u;
         }
+        res = (res << 1) | bit;
         if (rc->range < LZMA_TOP_VALUE) {
             rc->range <<= 8;
             rc->code = (rc->code << 8) | rc_get(rc);
@@ -843,7 +1661,9 @@ static uint8_t lzma_decode_literal(lzma_rc_dec *rc, lzma_probs *p, int state,
 /* ------------------------------------------------------------------ */
 
 static int bc_lzma2_encode_stream(const uint8_t *in, size_t in_len,
-                                  uint8_t *out, size_t out_cap, size_t *out_len)
+                                  uint8_t *out, size_t out_cap, size_t *out_len,
+                                  const lzma_opts *opts,
+                                  benc_progress_fn cb, void *cb_ctx)
 {
     size_t pos = 0;
     size_t pos_out = 0;
@@ -856,8 +1676,17 @@ static int bc_lzma2_encode_stream(const uint8_t *in, size_t in_len,
 
     m.head = m.prev = NULL;
     if (in_len > 0) {
-        m.head = (uint32_t *)malloc((size_t)LZMA_HASH_SIZE * sizeof(uint32_t));
-        m.prev = (uint32_t *)malloc((size_t)LZMA_WINDOW * sizeof(uint32_t));
+        unsigned long head_sz =
+            (unsigned long)LZMA_HASH_SIZE * sizeof(uint32_t);
+        unsigned long prev_sz = (unsigned long)LZMA_WINDOW * sizeof(uint32_t);
+
+        /* A 16-bit size_t cannot describe the matcher; the stream then
+         * falls back to uncompressed chunks. */
+        if (head_sz <= (unsigned long)(size_t)-1 &&
+            prev_sz <= (unsigned long)(size_t)-1) {
+            m.head = (uint32_t *)malloc((size_t)head_sz);
+            m.prev = (uint32_t *)malloc((size_t)prev_sz);
+        }
         probs = (lzma_probs *)malloc(sizeof(lzma_probs));
         if (m.head && m.prev && probs) {
             size_t i;
@@ -874,10 +1703,12 @@ static int bc_lzma2_encode_stream(const uint8_t *in, size_t in_len,
     }
 
     while (pos < in_len) {
-        size_t chunk = in_len - pos;
-        if (chunk > LZMA_CHUNK_MAX)
-            chunk = LZMA_CHUNK_MAX;
+        unsigned long lim = (unsigned long)(in_len - pos);
+        size_t chunk;
 
+        if (lim > LZMA_CHUNK_MAX)
+            lim = LZMA_CHUNK_MAX;
+        chunk = (size_t)lim;
         if (have_matcher) {
             size_t csize = 0;
             lzma_rc_enc rcc;
@@ -891,12 +1722,16 @@ static int bc_lzma2_encode_stream(const uint8_t *in, size_t in_len,
                 tmp_cap = nc;
             }
             rc_enc_init(&rcc, tmp, tmp_cap);
-            lzma_encode_range(in, pos, pos + chunk, &m, probs, &rcc);
+            lzma_encode_range(in, pos, pos + chunk, &m, probs, &rcc, opts);
             rc_enc_flush(&rcc);
             if (!rcc.overflow)
                 csize = rcc.pos;
 
-            if (csize > 0 && csize < chunk && csize <= LZMA_CHUNK_MAX) {
+            if (csize > 0 && csize < chunk
+#if SIZE_MAX >= LZMA_CHUNK_MAX
+                && csize <= LZMA_CHUNK_MAX
+#endif
+                ) {
                 /* emit LZMA chunk */
                 uint32_t usize_m1 = (uint32_t)chunk - 1;
                 uint32_t csize_m1 = (uint32_t)csize - 1;
@@ -917,6 +1752,8 @@ static int bc_lzma2_encode_stream(const uint8_t *in, size_t in_len,
                 memcpy(out + pos_out, tmp, csize);
                 pos_out += csize;
                 pos += chunk;
+                if (cb)
+                    cb((unsigned long long)pos, (unsigned long long)in_len, cb_ctx);
                 continue;
             }
         }
@@ -933,6 +1770,8 @@ static int bc_lzma2_encode_stream(const uint8_t *in, size_t in_len,
             memcpy(out + pos_out, in + pos, chunk);
             pos_out += chunk;
             pos += chunk;
+            if (cb)
+                cb((unsigned long long)pos, (unsigned long long)in_len, cb_ctx);
         }
     }
 
@@ -951,13 +1790,13 @@ done:
 }
 
 static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
-                                  uint8_t **out_p, size_t *out_len)
+                                  uint8_t **out_p, size_t *out_len,
+                                  benc_progress_fn cb, void *cb_ctx)
 {
     size_t ip = 0, op = 0;
     size_t out_cap = 4096;
     uint8_t *out = NULL;
     lzma_probs *probs = NULL;
-    lzma_probs *p = probs;
     int state = 0;
     uint32_t reps[4] = { 1u, 1u, 1u, 1u };
     int have_probs = 0;
@@ -1012,7 +1851,6 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                 probs = (lzma_probs *)malloc(sizeof(lzma_probs));
                 if (!probs)
                     goto fail;
-                p = probs;
                 have_probs = 1;
             }
             if (reset_state || reset_dict) {
@@ -1029,7 +1867,7 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                     while (produced < usize) {
                         uint32_t pos_state = (uint32_t)op & LZMA_NUM_POS_MASK;
                         if (rc_dec_bit(&rc,
-                                       &p->is_match[state *
+                                       &probs->is_match[state *
                                                     LZMA_NUM_POS_STATES +
                                                     pos_state]) == 0) {
                             uint32_t lit_pos = (uint32_t)op;
@@ -1059,13 +1897,13 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                         } else {
                             uint32_t len;
                             uint32_t dist;
-                            if (rc_dec_bit(&rc, &p->is_rep[state]) == 0) {
+                            if (rc_dec_bit(&rc, &probs->is_rep[state]) == 0) {
                                 uint32_t slot;
-                                len = lzma_decode_len(&rc, &p->match_len,
+                                len = lzma_decode_len(&rc, &probs->match_len,
                                                       pos_state);
                                 slot = rc_dec_bit_tree(
                                     &rc,
-                                    p->pos_slot[(len - LZMA_MATCH_MIN_LEN < 4)
+                                    probs->pos_slot[(len - LZMA_MATCH_MIN_LEN < 4)
                                                     ? (len -
                                                       LZMA_MATCH_MIN_LEN)
                                                     : 3u],
@@ -1078,8 +1916,7 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                                     if (slot < LZMA_END_POS_MODEL_INDEX)
                                         dist += rc_dec_bit_tree_reverse(
                                             &rc,
-                                            p->spec_pos +
-                                                (size_t)(dist - slot - 1),
+                                            probs->spec_pos + dist,
                                             num_direct);
                                     else {
                                         dist += rc_dec_direct(
@@ -1087,7 +1924,7 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                                             num_direct - LZMA_NUM_ALIGN_BITS)
                                             << LZMA_NUM_ALIGN_BITS;
                                         dist += rc_dec_bit_tree_reverse(
-                                            &rc, p->align,
+                                            &rc, probs->align,
                                             LZMA_NUM_ALIGN_BITS);
                                     }
                                 }
@@ -1098,8 +1935,8 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                                 reps[0] = dist;
                                 state = lzma_state_match(state);
                             } else {
-                                if (rc_dec_bit(&rc, &p->is_rep_g0[state]) == 0) {
-                                    if (rc_dec_bit(&rc, &p->is_rep0_long[
+                                if (rc_dec_bit(&rc, &probs->is_rep_g0[state]) == 0) {
+                                    if (rc_dec_bit(&rc, &probs->is_rep0_long[
                                             state * LZMA_NUM_POS_STATES +
                                             pos_state]) == 0) {
                                         if (reps[0] > op)
@@ -1121,10 +1958,10 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                                     }
                                 } else {
                                     uint32_t d;
-                                    if (rc_dec_bit(&rc, &p->is_rep_g1[state]) == 0)
+                                    if (rc_dec_bit(&rc, &probs->is_rep_g1[state]) == 0)
                                         d = reps[1];
                                     else {
-                                        if (rc_dec_bit(&rc, &p->is_rep_g2[state]) == 0)
+                                        if (rc_dec_bit(&rc, &probs->is_rep_g2[state]) == 0)
                                             d = reps[2];
                                         else {
                                             d = reps[3];
@@ -1135,7 +1972,7 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                                     reps[1] = reps[0];
                                     reps[0] = d;
                                 }
-                                len = lzma_decode_len(&rc, &p->rep_len,
+                                len = lzma_decode_len(&rc, &probs->rep_len,
                                                       pos_state);
                                 dist = reps[0];
                                 state = lzma_state_rep(state);
@@ -1162,6 +1999,8 @@ static int bc_lzma2_decode_stream(const uint8_t *in, size_t in_len,
                     }
                 }
                 ip = chunk_end;
+                if (cb)
+                    cb((unsigned long long)ip, (unsigned long long)in_len, cb_ctx);
             }
         }
     }
@@ -1180,7 +2019,8 @@ end:
     return rc_ret;
 }
 
-int benc_lzma2_encode(const char *src, const char *dst, int preset, int threads)
+int benc_lzma2_encode(const char *src, const char *dst, int preset, int threads,
+                      benc_progress_fn cb, void *cb_ctx)
 {
     uint8_t *in = NULL;
     size_t in_len = 0;
@@ -1188,16 +2028,26 @@ int benc_lzma2_encode(const char *src, const char *dst, int preset, int threads)
     size_t out_cap = 0;
     size_t out_len = 0;
     int rc = -1;
+    lzma_opts opts;
 
-    (void)preset;
     (void)threads;
+    lzma_opts_from_level(preset, &opts);
     if (bc_read_file(src, &in, &in_len) != 0)
         return -1;
-    out_cap = in_len + (in_len >> 14) + 4096;
+    if (cb)
+        cb(0, (unsigned long long)in_len, cb_ctx);
+    {
+        unsigned long cap = (unsigned long)in_len + (in_len >> 14) + 4096;
+
+        if (cap > (unsigned long)(size_t)-1)
+            goto out;
+        out_cap = (size_t)cap;
+    }
     out = (uint8_t *)malloc(out_cap);
     if (!out)
         goto out;
-    if (bc_lzma2_encode_stream(in, in_len, out, out_cap, &out_len) != 0)
+    if (bc_lzma2_encode_stream(in, in_len, out, out_cap, &out_len, &opts,
+                               cb, cb_ctx) != 0)
         goto out;
     if (bc_write_file(dst, out, out_len) != 0)
         goto out;
@@ -1208,7 +2058,8 @@ out:
     return rc;
 }
 
-int benc_lzma2_decode(const char *src, const char *dst)
+int benc_lzma2_decode(const char *src, const char *dst,
+                      benc_progress_fn cb, void *cb_ctx)
 {
     uint8_t *in = NULL;
     size_t in_len = 0;
@@ -1218,7 +2069,9 @@ int benc_lzma2_decode(const char *src, const char *dst)
 
     if (bc_read_file(src, &in, &in_len) != 0)
         return -1;
-    if (bc_lzma2_decode_stream(in, in_len, &out, &out_len) != 0)
+    if (cb)
+        cb(0, (unsigned long long)in_len, cb_ctx);
+    if (bc_lzma2_decode_stream(in, in_len, &out, &out_len, cb, cb_ctx) != 0)
         goto out;
     if (bc_write_file(dst, out, out_len) != 0)
         goto out;

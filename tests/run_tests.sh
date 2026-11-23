@@ -161,9 +161,9 @@ fi
 
 echo "== compression =="
 if "$BENC" info "$WORK/text.txt.benc" | grep -q 'Compression:[[:space:]]*lzma'; then
-    ok "lzma is the default compression"
+    ok "lzma2 is the default compression"
 else
-    bad "lzma is the default compression"
+    bad "lzma2 is the default compression"
 fi
 
 for m in lzma zstd none; do

@@ -1,6 +1,6 @@
 # benc
 
-Single-file C program that turns any file or directory into an encrypted
+Small C program that turns any file or directory into an encrypted
 ASCII text file and back again, using one password. The container
 is always a plain text file (7-bit ASCII, base64 body), so it travels safely
 through e-mail, chat, USB sticks, line-based editors, version control and
@@ -27,10 +27,9 @@ Decrypted photos.benc -> photos
 Encryption is self-contained: SHA-256, HMAC, PBKDF2, ChaCha20, base64 and
 the container parser are all implemented in `benc.c`, with no OpenSSL,
 libsodium or other crypto library required. Compression is implemented in
-the same source tree (`benc_codecs.c`) using the built-in native LZMA2 and
-Zstd codecs, so no external library or command line tool is needed. That is
-what makes the encryption core portable enough to run the same code
-on DOS, Windows, macOS, Linux and Termux.
+the same source tree (`benc_codecs.c`): both LZMA2 and Zstd are fully native,
+so no library and no command line tool is needed. That is what makes the
+code portable enough to run on DOS, Windows, macOS, Linux and Termux.
 
 ## Usage
 
@@ -102,9 +101,10 @@ benc -c lzma notes.txt                  # alias for the default lzma2
 | `zstd` | 1-19 (3) | `-T` (accepted) | built in (`benc_codecs.c`) |
 | `none` | - | no | built in (no compression) |
 
-Both built-in codecs run inside `benc_codecs.c`; there is no external library
-or command line tool involved, and the LZMA2 stream is byte-compatible with
-the one produced by the `xz` tool.
+Both codecs run inside `benc_codecs.c`; no library or command line tool is
+involved. The LZMA2 stream is byte-compatible with the one produced by the
+`xz` tool, and Zstd output is a standard Zstd frame readable by the `zstd`
+tool.
 
 With `-T 0` (the default) thread-aware codecs use every core. The chosen codec,
 level and thread count are stored in the authenticated header, so `benc info`
@@ -242,22 +242,24 @@ make linux STATIC=1          # fully static binary, handy for old distros
 make DEBUG=1                 # -O0 -g3
 ```
 
-Without `make`, the single-file build is always available:
+Without `make`, a direct build is always available:
 
 | Platform | Command |
 | --- | --- |
-| Linux, macOS, Termux, *BSD | `cc -std=c99 -O2 -o benc benc.c` |
-| Windows, MSVC | `cl /O2 /W3 benc.c bcrypt.lib /Fe:benc.exe` |
-| Windows, MinGW | `gcc -std=c99 -O2 -o benc.exe benc.c -lbcrypt` |
-| DOS, ia16 | `ia16-elf-gcc -std=c99 -O2 -mcmodel=medium -o benc.exe benc.c` |
+| Linux, macOS, Termux, *BSD | `cc -std=c99 -O2 -o benc benc.c benc_codecs.c benc_tar.c` |
+| Windows, MSVC | `cl /O2 /W3 benc.c benc_codecs.c benc_tar.c bcrypt.lib /Fe:benc.exe` |
+| Windows, MinGW | `gcc -std=c99 -O2 -o benc.exe benc.c benc_codecs.c benc_tar.c -lbcrypt` |
+| DOS, ia16 | `ia16-elf-gcc -std=c99 -O2 -mcmodel=medium -o benc.exe benc.c benc_codecs.c benc_tar.c` |
 
-Only a C99 compiler is needed. The DOS build targets 16-bit x86 with the
+Only a C99 compiler is needed; all three source files are compiled together. The DOS build targets 16-bit x86 with the
 medium memory model (`-mcmodel=medium`); the default tiny model is too small.
 
 ## Files
 
 ```
-benc.c               the whole program
+benc.c               CLI, container format and encryption core
+benc_codecs.c        native LZMA2 and Zstd codecs
+benc_tar.c           built-in tar for directory payloads
 Makefile             cross-platform build
 tests/run_tests.sh   end-to-end test suite (make test)
 tests/data/          compatibility fixtures (version 2 and 3 lineage)
