@@ -134,6 +134,12 @@ WIN64_CC   ?= x86_64-w64-mingw32-gcc
 WIN32_CC   ?= i686-w64-mingw32-gcc
 WINARM_CC  ?= arm-w64-mingw32-gcc
 WINARM64_CC ?= aarch64-w64-mingw32-gcc
+WINDRES64   ?= x86_64-w64-mingw32-windres
+WINDRES32   ?= i686-w64-mingw32-windres
+WINDRESARM  ?= arm-w64-mingw32-windres
+WINDRESARM64 ?= aarch64-w64-mingw32-windres
+# Windows resource script: embeds img/benc.ico + version info into the .exe.
+WINRC      ?= benc.rc
 DOS_CC     ?= ia16-elf-gcc
 ifeq ($(findstring ia16,$(DOS_CC)),ia16)
   DOS_EXTRA ?= -mcmodel=medium
@@ -442,6 +448,17 @@ solaris: bsd
 # ------------------------------------------------------------- windows ----
 windows: windows-amd64 windows-386
 
+# Compile the resource script (icon + version info) for a Windows target.
+# $(1) = output directory under $(BUILD), $(2) = windres cross tool.
+define WIN_RESOURCE
+	@command -v $(2) >/dev/null 2>&1 || { \
+	  echo "$(1): windres '$(2)' not found." >&2; \
+	  echo "  Debian/Ubuntu: sudo apt install binutils-mingw-w64" >&2; \
+	  echo "  or set the matching WINDRES* variable" >&2; exit 1; }
+	@mkdir -p $(BUILD)/$(1)
+	$(2) -I. -O coff -o $(BUILD)/$(1)/benc-res.o $(WINRC)
+endef
+
 windows-amd64:
 ifeq ($(HOST),windows)
 	@echo "windows-amd64: the host is Windows, use 'make' for a native build"
@@ -450,9 +467,9 @@ else
 	  echo "windows-amd64: $(WIN64_CC) not found." >&2; \
 	  echo "  Debian/Ubuntu: sudo apt install gcc-mingw-w64-x86-64" >&2; \
 	  echo "  or set WIN64_CC=/path/to/x86_64-w64-mingw32-gcc" >&2; exit 1; }
-	@mkdir -p $(BUILD)/windows-amd64
+	$(call WIN_RESOURCE,windows-amd64,$(WINDRES64))
 	$(WIN64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-amd64/$(APP).exe \
-	    $(SRC) $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BUILD)/windows-amd64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 endif
 
 windows-386:
@@ -463,9 +480,9 @@ else
 	  echo "windows-386: $(WIN32_CC) not found." >&2; \
 	  echo "  Debian/Ubuntu: sudo apt install gcc-mingw-w64-i686" >&2; \
 	  echo "  or set WIN32_CC=/path/to/i686-w64-mingw32-gcc" >&2; exit 1; }
-	@mkdir -p $(BUILD)/windows-386
+	$(call WIN_RESOURCE,windows-386,$(WINDRES32))
 	$(WIN32_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-386/$(APP).exe \
-	    $(SRC) $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BUILD)/windows-386/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 endif
 
 # ------------------------------------------------------------ windows-arm ----

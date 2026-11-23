@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="img/benc.png" alt="benc" width="256" />
+</p>
+
 # benc
 
 Small C program that turns any file or directory into an encrypted
