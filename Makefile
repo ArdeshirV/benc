@@ -138,8 +138,8 @@ else
   DOS_EXTRA ?=
 endif
 MACOS_CC      ?= $(if $(shell command -v o64-clang 2>/dev/null),o64-clang,)
-MACOS_AMD64_CC ?= x86_64-apple-darwin21-clang
-MACOS_ARM64_CC ?= aarch64-apple-darwin21-clang
+MACOS_AMD64_CC ?= $(if $(shell command -v x86_64-apple-darwin24.1-clang 2>/dev/null),x86_64-apple-darwin24.1-clang,)
+MACOS_ARM64_CC ?= $(if $(shell command -v aarch64-apple-darwin24.1-clang 2>/dev/null),aarch64-apple-darwin24.1-clang,)
 TERMUX_CC  ?= $(if $(shell command -v aarch64-linux-android21-clang 2>/dev/null),aarch64-linux-android21-clang,)
 LINUX_CC   ?=
 LINUX_386_CC   ?= i686-linux-gnu-gcc
