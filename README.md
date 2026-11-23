@@ -110,6 +110,27 @@ With `-T 0` (the default) thread-aware codecs use every core. The chosen codec,
 level and thread count are stored in the authenticated header, so `benc info`
 shows them without the password.
 
+### 16-bit DOS
+
+The DOS build is 16-bit: `size_t` holds 16 bits and a single object cannot
+exceed 64 KiB, which is less than the compression tables need. The codecs
+degrade instead of failing:
+
+* Zstd stores **raw (uncompressed) blocks**. The frames are still standard
+  Zstd and decode normally with the `zstd` tool or with this program on any
+  other platform. A Zstd frame that uses compressed blocks (for example from
+  a container made on a PC) cannot be decompressed on DOS and is rejected
+  with an error.
+* LZMA2 always emits valid chunks. When the match finder does not fit it
+  writes uncompressed chunks, so the result is larger but still
+  `xz`-compatible, and compressed LZMA2 streams from other platforms
+  decompress normally.
+* The 16-bit heap is under 64 KiB in total, so only small payloads work: in
+  testing a 20 KB file round-tripped while a 60 KB one failed before
+  compression started.
+
+Compress and encrypt large inputs on a 32-bit or 64-bit platform.
+
 ## Container format
 
 ```
@@ -253,6 +274,8 @@ Without `make`, a direct build is always available:
 
 Only a C99 compiler is needed; all three source files are compiled together. The DOS build targets 16-bit x86 with the
 medium memory model (`-mcmodel=medium`); the default tiny model is too small.
+Because `size_t` is 16 bits there, Zstd payloads are stored uncompressed and
+only small files fit in memory; see [16-bit DOS](#16-bit-dos).
 
 ## Files
 
