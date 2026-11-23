@@ -264,7 +264,9 @@ The Makefile knows how to build for every supported platform and prints a
 clear message when a toolchain is missing.
 
 ```
-make                  # native build, produces ./benc
+make                  # native build, produces ./benc (alias for `make native`)
+make native           # native build, produces ./benc
+make native-optimized # native build with -march=native (host CPU tuning) -> ./benc
 make linux            # -> build/linux/benc
 make linux-386        # -> build/linux-386/benc
 make linux-amd64      # -> build/linux-amd64/benc
@@ -273,7 +275,9 @@ make linux-arm64      # -> build/linux-arm64/benc
 make macos            # -> build/macos/benc
 make macos-amd64      # -> build/macos-amd64/benc
 make macos-arm64      # -> build/macos-arm64/benc
+make macos-universal  # macOS universal, arm64 + amd64 -> build/macos-universal/benc
 make termux           # -> build/termux/benc
+make termux-arm64     # -> build/termux-arm64/benc
 make bsd              # -> build/bsd/benc
 make bsd-386          # -> build/bsd-386/benc
 make bsd-amd64        # -> build/bsd-amd64/benc
@@ -284,13 +288,29 @@ make windows-amd64    # -> build/windows-amd64/benc.exe
 make windows-386      # -> build/windows-386/benc.exe
 make windows-arm      # -> build/windows-arm/benc.exe
 make windows-arm64    # -> build/windows-arm64/benc.exe
+make windows-msvc     # build with MSVC (cl) from a VS developer prompt
 make dos              # -> build/dos/benc.exe
+make nace-drex        # optional Nace Drex client -> build/nace/nace-drex
 make all-platforms    # build every platform whose toolchain is installed
 make check            # show which toolchains were detected
 make test             # run the test suite with the native build
 make install          # install into $(PREFIX)/bin (default /usr/local)
-make help
+make clean            # remove all build products
+make distclean        # same as clean
+make help             # show this target list
 ```
+
+`make native-optimized` appends `-march=native` to the build flags, so the
+resulting binary is tuned for the CPU it was built on and may not run on older
+or different processors. Use plain `make` for a portable binary.
+
+The Windows executables embed the application icon (`img/benc.ico`) and a
+version resource through `benc.rc`, compiled with `windres` (from
+`binutils-mingw-w64`) and linked into every `windows-*` build.
+
+`make nace-drex` builds the optional Nace Drex helper from `nace_drex*.c`.
+Those sources are not part of this repository, so the target only works when
+you provide them.
 
 Cross compilers are picked up automatically when they are on `PATH`; override
 any of them on the command line:
@@ -334,6 +354,9 @@ benc.c               CLI, container format and encryption core
 benc_platform.h      platform abstraction layer (OS, tty, file, path, entropy)
 benc_codecs.c        native LZMA2 and Zstd codecs
 benc_tar.c           built-in tar for directory payloads
+benc.rc              Windows resource script (icon + version info)
+img/benc.ico         Windows application icon
+img/benc.png         project icon used in this README
 Makefile             cross-platform build
 tests/run_tests.sh   end-to-end test suite (make test)
 tests/data/          compatibility fixtures (version 2 and 3 lineage)
