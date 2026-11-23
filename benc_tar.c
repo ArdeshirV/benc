@@ -20,11 +20,13 @@
 #include <dirent.h>
 #include <time.h>
 #include <errno.h>
+#include <unistd.h>
 
 #define BC_TAR_BLOCK 512
 #define BC_TAR_NAME_MAX 1024
 
-static int tar_header_write(FILE *out, const char *name, size_t size, int typeflag)
+static int tar_header_write(FILE *out, const char *name, size_t size, int typeflag,
+                            const char *linkname)
 {
     char h[512];
     unsigned long sum = 0;
@@ -36,6 +38,12 @@ static int tar_header_write(FILE *out, const char *name, size_t size, int typefl
         if (n > 100)
             n = 100;
         memcpy(h, name, n);
+    }
+    if (linkname && linkname[0]) {
+        size_t n = strlen(linkname);
+        if (n > 100)
+            return -1;
+        memcpy(h + 157, linkname, n);
     }
     snprintf(h + 100, 8, "%07o", 0755);
     snprintf(h + 108, 8, "%07o", 0);
@@ -92,7 +100,7 @@ static int tar_add_file(const char *fsname, const char *arcname, FILE *out,
         fclose(f);
         return -1;
     }
-    if (tar_header_write(out, arcname, (size_t)st.st_size, '0') != 0) {
+    if (tar_header_write(out, arcname, (size_t)st.st_size, '0', NULL) != 0) {
         fclose(f);
         return -1;
     }
@@ -127,6 +135,24 @@ static int tar_add_file(const char *fsname, const char *arcname, FILE *out,
     return 0;
 }
 
+static int tar_add_symlink(const char *fsname, const char *arcname, FILE *out,
+                           benc_tar_progress_fn cb, void *cb_ctx,
+                           unsigned long long *done, unsigned long long total)
+{
+    char target[BC_TAR_NAME_MAX];
+    ssize_t n = readlink(fsname, target, sizeof target - 1);
+
+    if (n < 0)
+        return -1;
+    target[n] = '\0';
+    if (tar_header_write(out, arcname, 0, '2', target) != 0)
+        return -1;
+    *done += 512;
+    if (cb)
+        cb(*done, total, cb_ctx);
+    return 0;
+}
+
 static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out,
                        benc_tar_progress_fn cb, void *cb_ctx,
                        unsigned long long *done, unsigned long long total)
@@ -137,7 +163,7 @@ static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out,
 
     if (!d)
         return -1;
-    if (tar_header_write(out, arcname, 0, '5') != 0) {
+    if (tar_header_write(out, arcname, 0, '5', NULL) != 0) {
         closedir(d);
         return -1;
     }
@@ -153,7 +179,7 @@ static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out,
             continue;
         snprintf(child, sizeof child, "%s/%s", fsdir, e->d_name);
         snprintf(childarc, sizeof childarc, "%s%s", arcname, e->d_name);
-        if (stat(child, &st) != 0) {
+        if (lstat(child, &st) != 0) {
             rc = -1;
             break;
         }
@@ -163,9 +189,11 @@ static int tar_add_dir(const char *fsdir, const char *arcname, FILE *out,
             rc = tar_add_dir(child, sub, out, cb, cb_ctx, done, total);
         } else if (S_ISREG(st.st_mode)) {
             rc = tar_add_file(child, childarc, out, cb, cb_ctx, done, total);
+        } else if (S_ISLNK(st.st_mode)) {
+            rc = tar_add_symlink(child, childarc, out, cb, cb_ctx, done, total);
         } else {
-            rc = -1;
-            break;
+            /* FIFOs, sockets and device nodes have no tar representation here:
+             * skip them instead of aborting the whole archive. */
         }
         if (rc)
             break;
@@ -206,7 +234,7 @@ static int tar_add_dir_size(const char *fsdir, unsigned long long *total)
         if (tar_is_dot_entry(e->d_name))
             continue;
         snprintf(child, sizeof child, "%s/%s", fsdir, e->d_name);
-        if (stat(child, &st) != 0) {
+        if (lstat(child, &st) != 0) {
             rc = -1;
             break;
         }
@@ -214,9 +242,10 @@ static int tar_add_dir_size(const char *fsdir, unsigned long long *total)
             rc = tar_add_dir_size(child, total);
         else if (S_ISREG(st.st_mode))
             rc = tar_add_file_size(child, total);
+        else if (S_ISLNK(st.st_mode))
+            *total += 512;
         else {
-            rc = -1;
-            break;
+            /* special file types are skipped by tar_add_dir too */
         }
         if (rc)
             break;
@@ -393,7 +422,7 @@ int benc_tar_extract(const char *src, const char *dest,
         if (typeflag == '5') {
             if (benc_mkdir_p(full) != 0)
                 return -1;
-        } else if (typeflag == '0' || typeflag == 0) {
+        } else if (typeflag == '0' || typeflag == 0 || typeflag == '2') {
             flen = strlen(full);
             if (flen >= sizeof dirp)
                 return -1;
@@ -405,25 +434,36 @@ int benc_tar_extract(const char *src, const char *dest,
                     return -1;
                 *slash = '/';
             }
-            if (size > len - pos - BC_TAR_BLOCK) {
-                free(in);
-                return -1;
-            }
-            {
-                FILE *of = fopen(full, "wb");
-                size_t rem = size;
-                unsigned char *odata = (unsigned char *)in + pos + BC_TAR_BLOCK;
-                if (!of)
+            if (typeflag == '2') {
+                char linkname[101];
+                memcpy(linkname, h + 157, 100);
+                linkname[100] = '\0';
+                remove(full);
+                if (symlink(linkname, full) != 0) {
+                    free(in);
                     return -1;
-                while (rem > 0) {
-                    size_t n = rem > 4096 ? 4096 : rem;
-                    if (fwrite(odata, 1, n, of) != n)
-                        return -1;
-                    odata += n;
-                    rem -= n;
                 }
-                if (fclose(of) != 0)
+            } else {
+                if (size > len - pos - BC_TAR_BLOCK) {
+                    free(in);
                     return -1;
+                }
+                {
+                    FILE *of = fopen(full, "wb");
+                    size_t rem = size;
+                    unsigned char *odata = (unsigned char *)in + pos + BC_TAR_BLOCK;
+                    if (!of)
+                        return -1;
+                    while (rem > 0) {
+                        size_t n = rem > 4096 ? 4096 : rem;
+                        if (fwrite(odata, 1, n, of) != n)
+                            return -1;
+                        odata += n;
+                        rem -= n;
+                    }
+                    if (fclose(of) != 0)
+                        return -1;
+                }
             }
         } else {
             return -1;

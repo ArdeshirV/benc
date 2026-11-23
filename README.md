@@ -1,27 +1,34 @@
 # benc
 
 Small C program that turns any file or directory into an encrypted
-ASCII text file and back again, using one password. The container
-is always a plain text file (7-bit ASCII, base64 body), so it travels safely
-through e-mail, chat, USB sticks, line-based editors, version control and
-printers. Payloads are compressed before they are encrypted (LZMA2 by
-default, or Zstd) and decompressed after decryption. Only the built-in
-native codecs are accepted: `lzma2` (default), `zstd` and `none`.
+container and back again, using one password. The default output is a tight
+binary container; pass `--textout` to get the ASCII text file (7-bit ASCII,
+base64 body) instead, which travels safely through e-mail, chat, USB sticks,
+line-based editors, version control and printers. Payloads are compressed
+before they are encrypted (LZMA2 by default, or Zstd) and decompressed after
+decryption. Only the built-in native codecs are accepted: `lzma2` (default),
+`zstd` and `none`.
+
+The default output is a tight binary container (canonical header line +
+ciphertext + 32-byte tag, magic `benc|`). Pass `--textout` to write the
+ASCII text/base64 container instead (7-bit ASCII, base64 body); a binary
+file is detected by its magic and decrypted transparently. Pass `-b` /
+`--binout` to force the binary container.
 
 ```
 $ benc notes.pdf
 Password:
 Repeat password:
-Encrypted notes.pdf -> notes.pdf.benc
+Encrypted notes.pdf -> notes.pdf.bct
 
-$ benc notes.pdf.benc
+$ benc notes.pdf.bct
 Password:
-Decrypted notes.pdf.benc -> notes.pdf
+Decrypted notes.pdf.bct -> notes.pdf
 
 $ benc photos/                    # a directory is packed into a tar first
-Encrypted photos -> photos.benc
-$ benc photos.benc                # ... and unpacked again afterwards
-Decrypted photos.benc -> photos
+Encrypted photos -> photos.bct
+$ benc photos.bct                # ... and unpacked again afterwards
+Decrypted photos.bct -> photos
 ```
 
 Encryption is self-contained: SHA-256, HMAC, PBKDF2, ChaCha20, base64 and
@@ -45,8 +52,9 @@ benc --version
 
 Default output names:
 
-* `encrypt` -> `<input>.benc`
-* `decrypt` -> input with `.benc` removed, or `<input>.dec` if there is none
+* `encrypt` -> `<input>.bct` with `--textout` (text container), or
+  `<input>.bcb` (binary container, the default)
+* `decrypt` -> input with `.bct` / `.bcb` removed, or `<input>.dec` if there is none
 
 Options:
 
@@ -58,6 +66,8 @@ Options:
 | `-i, --iterations N` | PBKDF2 iteration count for new files (default 210000) |
 | `-c, --compress NAME` | `lzma2` (default), `zstd`, `none` |
 | `--no-compress` | same as `--compress none` |
+| `-b, --binout` | write a tight binary container (default) |
+| `-t, --textout` | write the ASCII text/base64 container instead of the binary default |
 | `-l, --level N` | compression level (codec default when omitted) |
 | `-T, --threads N` | worker threads for the compressor (`0` = all cores) |
 | `-f, --force` | overwrite an existing output file |
@@ -172,6 +182,14 @@ Size: <bytes or ->
   `tests/data/`.
 * The body is the payload, encrypted, followed by a 32-byte tag, base64
   encoded in 64-character lines.
+
+### Binary container (`-b` / `--binout`, default)
+
+The default output is the tight binary container: the canonical header line,
+then the encrypted payload, then the 32-byte tag, all raw bytes. With
+`--textout` the output is instead the ASCII text/base64 container (7-bit
+ASCII, base64 body). The binary form starts with the canonical header magic
+(`benc|<version>|...`) and is detected and decrypted transparently.
 
 Key schedule:
 
