@@ -12,6 +12,7 @@
 #   make macos-arm64      macOS arm64         -> build/macos-arm64/benc
 #   make macos-universal  macOS arm64 + amd64 -> build/macos-universal/benc
 #   make termux           Termux/Android      -> build/termux/benc
+#   make termux-arm64     Termux/Android arm64 -> build/termux-arm64/benc
 #   make bsd              *BSD (host arch)    -> build/bsd/benc
 #   make bsd-386          *BSD i386           -> build/bsd-386/benc
 #   make bsd-amd64        *BSD x86_64         -> build/bsd-amd64/benc
@@ -160,7 +161,7 @@ endif
 
 # ------------------------------------------------------------- targets ----
 .PHONY: all native linux linux-386 linux-amd64 linux-arm linux-arm64 macos macos-amd64 macos-arm64 \
-        macos-universal termux bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 solaris windows windows-amd64 \
+        macos-universal termux termux-arm64 bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 solaris windows windows-amd64 \
         windows-386 windows-arm windows-arm64 windows-msvc dos all-platforms check test \
         nace-drex install clean distclean help
 
