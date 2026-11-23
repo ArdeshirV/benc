@@ -61,7 +61,7 @@ recognised by its magic and decrypted transparently.
 > 🧬 **Self-contained by design.** SHA-256, HMAC, PBKDF2, ChaCha20, base64, the
 > container parser **and** both LZMA2 and Zstd codecs live in this source tree.
 > No OpenSSL, no libsodium, no `xz`/`zstd` binaries — just a C99 compiler. That
-> is what makes the same code run on a 16-bit DOS box and a modern Mac.
+> is what lets the same code run on a 16-bit DOS box and a modern Mac.
 
 ---
 
@@ -90,12 +90,15 @@ Decrypted notes.pdf.bct -> notes.pdf  (16 B, 0.2 s)
 $ benc photos/                    # a directory is packed into a tar first
 Password:
 Repeat password:
-Encrypted photos/ -> photos.bcb  (129 B, 0.3 s)
+Encrypted photos/ -> photos.bcb  (111 B, 0.2 s)
 
 $ benc photos.bcb                # ... and unpacked again afterwards
 Password:
-Extracted photos.bcb -> photos  (129 B, 0.3 s)
+Extracted photos.bcb -> photos  (111 B, 0.2 s)
 ```
+
+> ℹ️ Sizes and timings vary with the input and machine. The default output is
+> the binary `.bcb` container; `--textout` selects the ASCII `.bct` container.
 
 ---
 
@@ -104,8 +107,8 @@ Extracted photos.bcb -> photos  (129 B, 0.3 s)
 
 ```console
 benc [options] <input> [output]        encrypt or decrypt (auto)
-benc encrypt [options] <input> [output]
-benc decrypt [options] <input> [output]
+benc encrypt [options] <input> [output]         # aliases: enc, e
+benc decrypt [options] <input> [output]         # aliases: dec, d
 benc info <file>
 benc selftest
 benc --help
@@ -116,7 +119,13 @@ benc --version
 
 - 🔒 `encrypt` → `<input>.bcb` (binary container, **default**), or `<input>.bct`
   with `--textout` (text container)
-- 🔓 `decrypt` → input with `.bct` / `.bcb` removed, or `<input>.dec` if there is none
+- 🔓 `decrypt` → input with `.bct` / `.bcb` (or legacy `.benc`) removed, or
+  `<input>.dec` if none matches
+- 📁 a directory keeps the same naming; encrypt reports it as `dir/` and decrypt
+  reports `Extracted …`
+
+If no command is given, `benc` detects the container by its header and encrypts
+or decrypts accordingly.
 
 ### ⚙️ Options
 
@@ -135,10 +144,9 @@ benc --version
 | `-f, --force` | overwrite an existing output file |
 | `-n, --use-header-name` | on decrypt, restore the original file name |
 | `--no-name` | on encrypt, don't store the original file name |
-| `-q, --quiet` | suppress informational messages |
-
-If no command is given, `benc` detects the container by its header and encrypts
-or decrypts accordingly.
+| `-q, --quiet` | suppress progress and result messages |
+| `-h, --help` | show the help text |
+| `-v, --version` | show the version |
 
 ---
 
