@@ -108,6 +108,28 @@
 #define BENC_MAC_NAME     "HMAC-SHA256"
 #define BENC_MAX_THREADS  1024
 
+/* Exit codes.  These are part of the command line contract: scripts branch
+ * on them, so the numeric values must stay stable.  Keep README.md in sync. */
+enum {
+    RC_OK          = 0,   /* success */
+    RC_ERR         = 1,   /* unspecified error */
+    RC_AUTH        = 2,   /* wrong password or tampered container */
+    RC_USAGE       = 3,   /* bad command line / usage */
+    RC_INPUT       = 4,   /* cannot open or read the input */
+    RC_OUTPUT      = 5,   /* cannot create or write the output */
+    RC_FORMAT      = 6,   /* not a benc file / malformed / truncated */
+    RC_UNSUPPORTED = 7,   /* unsupported version, KDF, cipher or codec */
+    RC_NOMEM       = 8,   /* out of memory */
+    RC_PASSWORD    = 9,   /* missing, empty, too long or mismatched password */
+    RC_CODEC       = 10,  /* compression or decompression failure */
+    RC_SELFTEST    = 11   /* built-in self-test failed */
+};
+
+/* Code of the most recent failc() call.  Lets a command return a precise exit
+ * status even when a failure is raised inside a helper that only returns
+ * through `fail(); goto done;`. */
+static int g_exit;
+
 /* Compression identifiers.  The order is part of the container: only the
  * name is written, but these values are used everywhere internally. */
 enum {
@@ -354,27 +376,49 @@ static void ui_final(const char *fmt, ...)
     ui_write(msg, n);
 }
 
-/* error: clears the status line, prints "benc: message", returns 1 */
-static int fail(const char *fmt, ...)
+/* Print "benc: message", clear the status line and record the exit code. */
+static int vfailc(int code, const char *fmt, va_list ap)
 {
     char msg[1024];
-    va_list ap;
     int n;
 
     n = snprintf(msg, sizeof msg - 2, "%s: ", BENC_NAME);
-    va_start(ap, fmt);
     vsnprintf(msg + n, sizeof msg - 2 - (size_t)n, fmt, ap);
-    va_end(ap);
     ui_clear();
     n = (int)strlen(msg);
     msg[n++] = '\n';
     ui_write(msg, (size_t)n);
-    return 1;
+    g_exit = code;
+    return code;
 }
 
-static int fail_errno(const char *what, const char *path)
+/* Failure with an explicit exit code. */
+static int failc(int code, const char *fmt, ...)
 {
-    return fail("%s '%s': %s", what, path, strerror(errno));
+    va_list ap;
+    int r;
+
+    va_start(ap, fmt);
+    r = vfailc(code, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+/* Failure with the generic RC_ERR code (kept for internal invariants). */
+static int fail(const char *fmt, ...)
+{
+    va_list ap;
+    int r;
+
+    va_start(ap, fmt);
+    r = vfailc(RC_ERR, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+static int failc_errno(int code, const char *what, const char *path)
+{
+    return failc(code, "%s '%s': %s", what, path, strerror(errno));
 }
 
 /* ---- progress bar ------------------------------------------------- */
@@ -1432,7 +1476,7 @@ static int parse_header(FILE *fp, benc_header *h)
     memset(h, 0, sizeof *h);
     r = read_line(fp, line, sizeof line);
     if (r != 1 || strcmp(line, BENC_BEGIN_FILE) != 0)
-        return fail("not a benc file (missing begin marker)");
+        return failc(RC_FORMAT, "not a benc file (missing begin marker)");
 
     for (;;) {
         char *colon, *key, *val;
@@ -1440,14 +1484,14 @@ static int parse_header(FILE *fp, benc_header *h)
 
         r = read_line(fp, line, sizeof line);
         if (r == 0)
-            return fail("unexpected end of file inside header");
+            return failc(RC_FORMAT, "unexpected end of file inside header");
         if (r < 0)
-            return fail("header line too long");
+            return failc(RC_FORMAT, "header line too long");
         if (strcmp(line, BENC_BEGIN_DATA) == 0)
             break;
         colon = strchr(line, ':');
         if (!colon)
-            return fail("malformed header line");
+            return failc(RC_FORMAT, "malformed header line");
         *colon = '\0';
         key = str_trim(line);
         val = str_trim(colon + 1);
@@ -1465,54 +1509,54 @@ static int parse_header(FILE *fp, benc_header *h)
         else if (strcmp(key, "Compression-Level") == 0)   bit = SEEN_LEVEL;
         else if (strcmp(key, "Compression-Threads") == 0) bit = SEEN_THREADS;
         else if (strcmp(key, "Input") == 0)               bit = SEEN_INPUT;
-        else return fail("unknown header field");
+        else return failc(RC_FORMAT, "unknown header field");
         if (seen & bit)
-            return fail("duplicate header field");
+            return failc(RC_FORMAT, "duplicate header field");
         seen |= bit;
 
         switch (bit) {
         case SEEN_VERSION:
             if (dec_to_u64(val, &v) || v < BENC_FMT_LEGACY ||
                 v > BENC_FMT_VERSION)
-                return fail("unsupported container version");
+                return failc(RC_UNSUPPORTED, "unsupported container version");
             h->version = (unsigned)v;
             break;
         case SEEN_KDF:
             if (strcmp(val, BENC_KDF_NAME) != 0)
-                return fail("unsupported key derivation function");
+                return failc(RC_UNSUPPORTED, "unsupported key derivation function");
             break;
         case SEEN_ITER:
             if (dec_to_u64(val, &v) || v == 0 || v > BENC_MAX_ITER)
-                return fail("invalid iteration count");
+                return failc(RC_FORMAT, "invalid iteration count");
             h->iterations = (unsigned long)v;
             break;
         case SEEN_CIPHER:
             if (strcmp(val, BENC_CIPHER_NAME) != 0)
-                return fail("unsupported cipher");
+                return failc(RC_UNSUPPORTED, "unsupported cipher");
             break;
         case SEEN_MAC:
             if (strcmp(val, BENC_MAC_NAME) != 0)
-                return fail("unsupported authenticator");
+                return failc(RC_UNSUPPORTED, "unsupported authenticator");
             break;
         case SEEN_SALT: {
             size_t n;
             if (b64_decode(val, h->salt, sizeof h->salt, &n) ||
                 n != BENC_SALT_LEN || !b64_is_canonical(val, h->salt, n))
-                return fail("invalid salt");
+                return failc(RC_FORMAT, "invalid salt");
             break;
         }
         case SEEN_NONCE: {
             size_t n;
             if (b64_decode(val, h->nonce, sizeof h->nonce, &n) ||
                 n != BENC_NONCE_LEN || !b64_is_canonical(val, h->nonce, n))
-                return fail("invalid nonce");
+                return failc(RC_FORMAT, "invalid nonce");
             break;
         }
         case SEEN_NAME: {
             size_t n;
             if (b64_decode(val, (uint8_t *)h->name, BENC_MAX_NAME, &n) ||
                 !b64_is_canonical(val, (const uint8_t *)h->name, n))
-                return fail("invalid name field");
+                return failc(RC_FORMAT, "invalid name field");
             h->name[n] = '\0';
             h->name_len = n;
             break;
@@ -1520,32 +1564,32 @@ static int parse_header(FILE *fp, benc_header *h)
         case SEEN_COMP: {
             int id = comp_lookup(val);
             if (id < 0)
-                return fail("unsupported compression method '%s'", val);
+                return failc(RC_UNSUPPORTED, "unsupported compression method '%s'", val);
             h->comp = id;
             break;
         }
         case SEEN_LEVEL:
             if (dec_to_u64(val, &v) || v > 22)
-                return fail("invalid compression level");
+                return failc(RC_FORMAT, "invalid compression level");
             h->level = (int)v;
             break;
         case SEEN_THREADS:
             if (dec_to_u64(val, &v) || v > BENC_MAX_THREADS)
-                return fail("invalid thread count");
+                return failc(RC_FORMAT, "invalid thread count");
             h->threads = (int)v;
             break;
         case SEEN_INPUT:
             if (strcmp(val, "tar") == 0)
                 h->archive = 1;
             else if (strcmp(val, "file") != 0)
-                return fail("unsupported input kind");
+                return failc(RC_UNSUPPORTED, "unsupported input kind");
             break;
         case SEEN_SIZE:
             if (strcmp(val, "-") == 0) {
                 h->size_known = 0;
             } else {
                 if (dec_to_u64(val, &v))
-                    return fail("invalid size field");
+                    return failc(RC_FORMAT, "invalid size field");
                 h->size = v;
                 h->size_known = 1;
             }
@@ -1553,10 +1597,10 @@ static int parse_header(FILE *fp, benc_header *h)
         }
     }
     if ((seen & SEEN_REQUIRED) != SEEN_REQUIRED)
-        return fail("incomplete header");
+        return failc(RC_FORMAT, "incomplete header");
     if (h->version > BENC_FMT_LEGACY &&
         (seen & SEEN_V4_REQUIRED) != SEEN_V4_REQUIRED)
-        return fail("incomplete header");
+        return failc(RC_FORMAT, "incomplete header");
     if (h->version <= BENC_FMT_LEGACY) {
         h->comp = COMP_NONE;
         h->level = 0;
@@ -1584,7 +1628,7 @@ static int read_body(FILE *fp, b64_sink sink, void *ctx, progress *pg,
     char *l1, *l2, *nl;
 
     if (!d || !buf) {
-        rc = fail("out of memory");
+        rc = failc(RC_NOMEM, "out of memory");
         goto out;
     }
     d->sink = sink;
@@ -1626,7 +1670,7 @@ static int read_body(FILE *fp, b64_sink sink, void *ctx, progress *pg,
             nlp = (const uint8_t *)memchr(buf + i, '\n', n - i);
             seg = nlp ? (size_t)(nlp - (buf + i)) : n - i;
             if (b64_dec_feed(d, buf + i, seg)) {
-                rc = fail("invalid base64 data");
+                rc = failc(RC_FORMAT, "invalid base64 data");
                 goto out;
             }
             if (nlp) {
@@ -1641,27 +1685,27 @@ static int read_body(FILE *fp, b64_sink sink, void *ctx, progress *pg,
     }
 
     if (b64_dec_finish(d)) {
-        rc = fail("truncated base64 data");
+        rc = failc(RC_FORMAT, "truncated base64 data");
         goto out;
     }
     tail[tlen] = '\0';
     l1 = tail;
     nl = strchr(l1, '\n');
     if (!nl) {
-        rc = fail("malformed end-of-data marker");
+        rc = failc(RC_FORMAT, "malformed end-of-data marker");
         goto out;
     }
     *nl = '\0';
     l2 = nl + 1;
     if (strcmp(str_trim(l1), BENC_END_DATA) != 0) {
-        rc = fail("malformed end-of-data marker");
+        rc = failc(RC_FORMAT, "malformed end-of-data marker");
         goto out;
     }
     nl = strchr(l2, '\n');
     if (nl)
         *nl = '\0';
     if (strcmp(str_trim(l2), BENC_END_FILE) != 0) {
-        rc = fail("missing end-of-file marker");
+        rc = failc(RC_FORMAT, "missing end-of-file marker");
         goto out;
     }
     rc = 0;
@@ -2243,9 +2287,9 @@ static int prompt_secret(const char *prompt, char *buf, size_t cap)
     ui_draw(prompt);
     r = read_secret(buf, cap);
     if (r == -1)
-        return fail("aborted");
+        return failc(RC_PASSWORD, "aborted");
     if (r == -2)
-        return fail("password too long (maximum %d bytes)", BENC_MAX_PASSWORD - 1);
+        return failc(RC_PASSWORD, "password too long (maximum %d bytes)", BENC_MAX_PASSWORD - 1);
     return r == 0 ? 1 : 0;       /* 1 = empty */
 }
 
@@ -2260,9 +2304,9 @@ static int get_password(const opts *o, char *buf, size_t cap, int confirm,
     if (o->password) {
         size_t n = strlen(o->password);
         if (n == 0)
-            return fail("empty password");
+            return failc(RC_PASSWORD, "empty password");
         if (n + 1 > cap)
-            return fail("password too long");
+            return failc(RC_PASSWORD, "password too long");
         memcpy(buf, o->password, n + 1);
         return 0;
     }
@@ -2271,24 +2315,24 @@ static int get_password(const opts *o, char *buf, size_t cap, int confirm,
         int r;
 
         if (!fp)
-            return fail_errno("cannot open password file", o->password_file);
+            return failc_errno(RC_PASSWORD, "cannot open password file", o->password_file);
         r = read_password_line(fp, buf, cap);
         fclose(fp);
         if (r == -2)
-            return fail("password too long");
+            return failc(RC_PASSWORD, "password too long");
         if (r <= 0)
-            return fail("password file is empty");
+            return failc(RC_PASSWORD, "password file is empty");
         return 0;
     }
     if (!benc_isatty(0)) {
         int r = read_password_line(stdin, buf, cap);
 
         if (r == -1)
-            return fail("no password supplied");
+            return failc(RC_PASSWORD, "no password supplied");
         if (r == -2)
-            return fail("password too long");
+            return failc(RC_PASSWORD, "password too long");
         if (r == 0)
-            return fail("empty password");
+            return failc(RC_PASSWORD, "empty password");
         return 0;
     }
 
@@ -2319,7 +2363,7 @@ static int get_password(const opts *o, char *buf, size_t cap, int confirm,
             benc_wipe(again, sizeof again);
             lead = "Passwords differ. ";
         }
-        return fail("too many attempts");
+        return failc(RC_PASSWORD, "too many attempts");
     }
 }
 
@@ -2414,7 +2458,7 @@ static int run_codec(int comp, int level, int threads,
                     : benc_zstd_encode(src, dst, level, threads,
                                        stage_progress_cb, &pg);
     else
-        rc = fail("unsupported compression method");
+        rc = failc(RC_CODEC, "unsupported compression method");
     progress_finish(&pg);
     return rc;
 }
@@ -2468,15 +2512,15 @@ static int make_directory(const char *path)
     if (is_directory(path))
         return 0;
     if (file_exists(path))
-        return fail("'%s' exists and is not a directory", path);
+        return failc(RC_CODEC, "'%s' exists and is not a directory", path);
 #if BENC_WINDOWS
     if (_mkdir(path) != 0 && !is_directory(path))
-        return fail_errno("cannot create directory", path);
+        return failc_errno(RC_OUTPUT, "cannot create directory", path);
 #elif BENC_POSIX
     if (mkdir(path, 0777) != 0 && !is_directory(path))
-        return fail_errno("cannot create directory", path);
+        return failc_errno(RC_OUTPUT, "cannot create directory", path);
 #else
-    return fail("cannot create directory '%s' on this platform", path);
+    return failc(RC_CODEC, "cannot create directory '%s' on this platform", path);
 #endif
     return 0;
 }
@@ -2541,7 +2585,6 @@ static int copy_tree(const char *src, const char *dst)
 /* ------------------------------------------------------------------ */
 /* encrypt / decrypt                                                   */
 /* ------------------------------------------------------------------ */
-enum { RC_OK = 0, RC_ERR = 1, RC_AUTH = 2 };
 
 static void derive_keys(const char *pw, const benc_header *h,
                         uint8_t enc_key[BENC_KEY_LEN],
@@ -2578,9 +2621,9 @@ static FILE *open_output(const char *out_path, char **tmp, int *direct)
 static int check_output(const char *in_path, const char *out_path, const opts *o)
 {
     if (same_file(in_path, out_path))
-        return fail("input and output are the same file");
+        return failc(RC_INPUT, "input and output are the same file");
     if (!o->force && file_exists(out_path) && is_regular_file(out_path))
-        return fail("output file '%s' already exists (use -f to overwrite)",
+        return failc(RC_OUTPUT, "output file '%s' already exists (use -f to overwrite)",
                     out_path);
     return 0;
 }
@@ -2595,17 +2638,17 @@ static int commit_output(FILE **outp, char *tmp, int direct,
     FILE *out = *outp;
 
     if (fflush(out) != 0) {
-        fail("cannot write output");
+        failc(RC_OUTPUT, "cannot write output");
         return -1;
     }
     if (fclose(out) != 0) {
         *outp = NULL;
-        fail("cannot close output");
+        failc(RC_OUTPUT, "cannot close output");
         return -1;
     }
     *outp = NULL;
     if (!direct && rename_over(tmp, out_path) != 0) {
-        fail_errno("cannot create output", out_path);
+        failc_errno(RC_OUTPUT, "cannot create output", out_path);
         return -1;
     }
     set_tmp(NULL);
@@ -2638,12 +2681,12 @@ static int stage_payload(const char *in_path, const char *out_path,
     *archive = 0;
     if (is_directory(in_path)) {
         if (split_dir(in_path, dirbuf, dcap, namebuf, ncap)) {
-            fail("cannot use '%s' as input", in_path);
+            failc(RC_INPUT, "cannot use '%s' as input", in_path);
             return -1;
         }
         staged[0] = stage_path(out_path, "tar");
         if (!staged[0]) {
-            fail("cannot create a temporary file next to '%s'", out_path);
+            failc(RC_OUTPUT, "cannot create a temporary file next to '%s'", out_path);
             return -1;
         }
         progress_begin(&pg, "Packing", 0, 1);
@@ -2653,7 +2696,7 @@ static int stage_payload(const char *in_path, const char *out_path,
             remove(staged[0]);
             free(staged[0]);
             staged[0] = NULL;
-            fail("cannot pack directory '%s'", in_path);
+            failc(RC_CODEC, "cannot pack directory '%s'", in_path);
             return -1;
         }
         progress_finish(&pg);
@@ -2670,7 +2713,7 @@ static int stage_payload(const char *in_path, const char *out_path,
                 free((void *)*src);
                 staged[0] = NULL;
             }
-            fail("cannot create a temporary file next to '%s'", out_path);
+            failc(RC_OUTPUT, "cannot create a temporary file next to '%s'", out_path);
             return -1;
         }
         if (run_codec(comp, level, threads, *src, staged[1], 0)) {
@@ -2715,8 +2758,11 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     memset(&cc, 0, sizeof cc);
     if (comp < 0 || comp >= COMP_COUNT)
         comp = COMP_NONE;
-    if (check_output(in_path, out_path, o))
-        return RC_ERR;
+    {
+        int cr = check_output(in_path, out_path, o);
+        if (cr)
+            return g_exit ? g_exit : cr;
+    }
     level = o->level >= 0 ? o->level : comp_specs[comp].def_level;
     threads = o->threads > BENC_MAX_THREADS ? BENC_MAX_THREADS
                                             : (int)o->threads;
@@ -2727,8 +2773,11 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
          level > comp_specs[comp].max_level))
         return fail("%s compression levels are %d..%d", comp_specs[comp].name,
                     comp_specs[comp].min_level, comp_specs[comp].max_level);
-    if (get_password(o, pw, sizeof pw, 1, "", &inter))
-        return RC_ERR;
+    {
+        int pr = get_password(o, pw, sizeof pw, 1, "", &inter);
+        if (pr)
+            return g_exit ? g_exit : pr;
+    }
 
     name = base_name(in_path);
     {
@@ -2743,7 +2792,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
 
     in = fopen(src, "rb");
     if (!in) {
-        fail_errno("cannot open input", src);
+        failc_errno(RC_INPUT, "cannot open input", src);
         goto done;
     }
     h.version = BENC_FMT_VERSION;
@@ -2778,25 +2827,25 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
 
     buf = (uint8_t *)malloc(BENC_CHUNK);
     if (!buf) {
-        fail("out of memory");
+        failc(RC_NOMEM, "out of memory");
         goto done;
     }
     out = open_output(out_path, &tmp, &direct);
     if (!out) {
-        fail_errno("cannot create output", tmp ? tmp : out_path);
+        failc_errno(RC_OUTPUT, "cannot create output", tmp ? tmp : out_path);
         goto done;
     }
     if (o->binout) {
         {
             size_t clen = strlen(canon);
             if (fwrite(canon, 1, clen, out) != clen) {
-                fail("cannot write output");
+                failc(RC_OUTPUT, "cannot write output");
                 goto done;
             }
         }
     } else {
         if (write_header(out, &h) || b64_w_init(&w, out)) {
-            fail("cannot write header");
+            failc(RC_OUTPUT, "cannot write header");
             goto done;
         }
         w_ok = 1;
@@ -2812,40 +2861,40 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
         hmac_update(&mac, buf, n);
         if (o->binout) {
             if (fwrite(buf, 1, n, out) != n) {
-                fail("cannot write output");
+                failc(RC_OUTPUT, "cannot write output");
                 goto done;
             }
         } else if (b64_w_put(&w, buf, n)) {
-            fail("cannot write output");
+            failc(RC_OUTPUT, "cannot write output");
             goto done;
         }
         done += n;
         progress_set(&pg, done);
     }
     if (ferror(in)) {
-        fail_errno("cannot read input", in_path);
+        failc_errno(RC_INPUT, "cannot read input", in_path);
         goto done;
     }
     if (h.size_known && done != h.size) {
-        fail("input file changed while it was being read");
+        failc(RC_INPUT, "input file changed while it was being read");
         goto done;
     }
     hmac_final(&mac, tag);
     if (o->binout) {
         if (fwrite(tag, 1, sizeof tag, out) != sizeof tag) {
-            fail("cannot write output");
+            failc(RC_OUTPUT, "cannot write output");
             goto done;
         }
         w_ok = 0;
     } else {
         if (b64_w_put(&w, tag, sizeof tag) || b64_w_close(&w)) {
             w_ok = 0;
-            fail("cannot write output");
+            failc(RC_OUTPUT, "cannot write output");
             goto done;
         }
         w_ok = 0;
         if (fprintf(out, "%s\n%s\n", BENC_END_DATA, BENC_END_FILE) < 0) {
-            fail("cannot write output");
+            failc(RC_OUTPUT, "cannot write output");
             goto done;
         }
     }
@@ -2888,6 +2937,8 @@ done:
         }
     }
     stage_forget();
+    if (rc == RC_ERR && g_exit)
+        rc = g_exit;
     return rc;
 }
 
@@ -2900,7 +2951,7 @@ static int verify_auth(hmac_ctx *mac, verify_ctx *ver, progress *pg,
 
     if (ver->total < BENC_TAG_LEN || ver->hlen != BENC_TAG_LEN) {
         progress_finish(pg);
-        return fail("file is truncated");
+        return failc(RC_FORMAT, "file is truncated");
     }
     hmac_final(mac, computed);
     if (!ct_equal(computed, ver->hold, BENC_TAG_LEN)) {
@@ -2936,7 +2987,7 @@ static int verify_pass(FILE *in, const benc_header *h, const char *canon,
     if (r != RC_OK)
         return r;
     if (h->size_known && h->size != *cipher_len)
-        return fail("file is truncated");
+        return failc(RC_FORMAT, "file is truncated");
     return RC_OK;
 }
 
@@ -2960,7 +3011,7 @@ static int verify_bin(FILE *in, const char *canon, size_t clen,
         size_t n = (size_t)(remaining > BENC_CHUNK ? BENC_CHUNK : remaining);
         if (fread(buf, 1, n, in) != n) {
             progress_finish(&pg);
-            return fail("file is truncated");
+            return failc(RC_FORMAT, "file is truncated");
         }
         if (verify_push(&ver, buf, n)) {
             progress_finish(&pg);
@@ -2984,7 +3035,7 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
 
     xdir = (char *)malloc(strlen(ram_temp_dir()) + 64);
     if (!xdir) {
-        fail("out of memory");
+        failc(RC_NOMEM, "out of memory");
         return -1;
     }
     snprintf(xdir, strlen(ram_temp_dir()) + 64, "%s/benc-dir-%u",
@@ -2994,7 +3045,7 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
     progress_begin(&pg, "Unpacking", 0, 1);
     if (extract_tar(tar, xdir, stage_progress_cb, &pg)) {
         progress_finish(&pg);
-        fail("cannot unpack directory archive");
+        failc(RC_CODEC, "cannot unpack directory archive");
         goto out;
     }
     progress_finish(&pg);
@@ -3007,14 +3058,14 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
     child[clen] = '\0';
     childp = (char *)malloc(strlen(xdir) + clen + 2);
     if (!childp) {
-        fail("out of memory");
+        failc(RC_NOMEM, "out of memory");
         goto out;
     }
     sprintf(childp, "%s/%s", xdir, child);
     if (copy_tree(childp, out_path) != 0) {
         free(childp);
         free(xdir);
-        fail_errno("cannot create output", out_path);
+        failc_errno(RC_OUTPUT, "cannot create output", out_path);
         return -1;
     }
     free(childp);
@@ -3242,12 +3293,15 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
     memset(&h, 0, sizeof h);
     memset(pw, 0, sizeof pw);
     memset(&cc, 0, sizeof cc);
-    if (check_output(in_path, out_path, o))
-        return RC_ERR;
+    {
+        int cr = check_output(in_path, out_path, o);
+        if (cr)
+            return g_exit ? g_exit : cr;
+    }
 
     in = fopen(in_path, "rb");
     if (!in) {
-        fail_errno("cannot open input", in_path);
+        failc_errno(RC_INPUT, "cannot open input", in_path);
         goto done;
     }
     {
@@ -3272,7 +3326,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
             }
             canon_bin[cn] = '\0';
             if (parse_canonical(canon_bin, &h)) {
-                fail("invalid binary container header");
+                failc(RC_FORMAT, "invalid binary container header");
                 goto done;
             }
             memcpy(canon, canon_bin, cn + 1);
@@ -3283,7 +3337,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         }
     }
     if (h.archive && !o->force && is_directory(out_path)) {
-        fail("output directory '%s' already exists (use -f to overwrite)",
+        failc(RC_OUTPUT, "output directory '%s' already exists (use -f to overwrite)",
              out_path);
         goto done;
     }
@@ -3327,25 +3381,25 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
 
     /* pass 2: decrypt */
     if (benc_fseek(in, (benc_off_t)hdr_end, SEEK_SET) != 0) {
-        fail("cannot rewind input");
+        failc(RC_INPUT, "cannot rewind input");
         goto done;
     }
     post = (h.comp != COMP_NONE || h.archive);
     if (post) {
         mid = stage_path(out_path, "dec");
         if (!mid) {
-            fail("cannot create a temporary file next to '%s'", out_path);
+            failc(RC_OUTPUT, "cannot create a temporary file next to '%s'", out_path);
             goto done;
         }
         out = fopen(mid, "wb");
         if (!out) {
-            fail_errno("cannot create temporary file", mid);
+            failc_errno(RC_OUTPUT, "cannot create temporary file", mid);
             goto done;
         }
     } else {
         out = open_output(out_path, &tmp, &direct);
         if (!out) {
-            fail_errno("cannot create output", tmp ? tmp : out_path);
+            failc_errno(RC_OUTPUT, "cannot create output", tmp ? tmp : out_path);
             goto done;
         }
     }
@@ -3360,23 +3414,23 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         uint64_t rem = cipher_len;
 
         if (benc_fseek(in, (benc_off_t)hdr_end, SEEK_SET) != 0) {
-            fail("cannot rewind input");
+            failc(RC_INPUT, "cannot rewind input");
             goto done;
         }
         while (rem > 0) {
             size_t n = (size_t)(rem > BENC_CHUNK ? BENC_CHUNK : rem);
             if (fread(dbuf, 1, n, in) != n) {
-                fail("file is truncated");
+                failc(RC_FORMAT, "file is truncated");
                 goto done;
             }
             if (plain_push(&plain, dbuf, n)) {
-                fail("cannot write output");
+                failc(RC_OUTPUT, "cannot write output");
                 goto done;
             }
             rem -= n;
         }
         if (plain.remaining != 0) {
-            fail("file is truncated");
+            failc(RC_FORMAT, "file is truncated");
             goto done;
         }
     } else if (read_body(in, plain_push, &plain, &pg, hdr_end)) {
@@ -3394,7 +3448,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
     /* staged plaintext: decompress, then unpack or rename into place */
     if (fclose(out) != 0) {
         out = NULL;
-        fail("cannot write output");
+        failc(RC_OUTPUT, "cannot write output");
         goto done;
     }
     out = NULL;
@@ -3404,7 +3458,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         if (h.comp != COMP_NONE) {
             unz = stage_path(out_path, "unz");
             if (!unz) {
-                fail("cannot create a temporary file next to '%s'", out_path);
+                failc(RC_OUTPUT, "cannot create a temporary file next to '%s'", out_path);
                 goto done;
             }
             if (run_codec(h.comp, 0, h.threads, mid, unz, 1))
@@ -3417,7 +3471,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
                 goto done;
         } else {
             if (rename_over(payload, out_path) != 0) {
-                fail_errno("cannot create output", out_path);
+                failc_errno(RC_OUTPUT, "cannot create output", out_path);
                 goto done;
             }
             report_result(o, "Decrypted", in_path, out_path, cipher_len, t0,
@@ -3450,6 +3504,8 @@ done:
         free(unz);
     }
     stage_forget();
+    if (rc == RC_ERR && g_exit)
+        rc = g_exit;
     return rc;
 }
 
@@ -3465,7 +3521,7 @@ static int cmd_info(const char *path)
     char num[24];
 
     if (!in)
-        return fail_errno("cannot open input", path);
+        return failc_errno(RC_INPUT, "cannot open input", path);
     if (parse_header(in, &h) || read_body(in, count_push, &body, NULL, 0)) {
         fclose(in);
         return RC_ERR;
@@ -3699,7 +3755,7 @@ static int run_selftest(void)
     }
     if (g_fails) {
         ui_final("selftest: %d of %d tests FAILED", g_fails, g_tests);
-        return 1;
+        return RC_SELFTEST;
     }
     ui_final("selftest: all %d tests passed", g_tests);
     return 0;
@@ -3772,7 +3828,7 @@ static int parse_iter(const char *s, unsigned long *out)
     uint64_t v;
 
     if (dec_to_u64(s, &v) || v == 0 || v > BENC_MAX_ITER)
-        return fail("invalid iteration count");
+        return failc(RC_USAGE, "invalid iteration count");
     *out = (unsigned long)v;
     return 0;
 }
@@ -3798,7 +3854,7 @@ static int parse_options(int argc, char **argv, int start, opts *o,
         }
         if (a[0] != '-' || a[1] == '\0') {
             if (*npos >= 4)
-                return fail("too many arguments");
+                return failc(RC_USAGE, "too many arguments");
             pos[(*npos)++] = a;
             continue;
         }
@@ -3806,7 +3862,7 @@ static int parse_options(int argc, char **argv, int start, opts *o,
         nl = strcspn(a, "=");
         if (a[1] == '-' && a[nl] == '=') {
             if (nl >= sizeof name)
-                return fail("unknown option '%s'", a);
+                return failc(RC_USAGE, "unknown option '%s'", a);
             memcpy(name, a, nl);
             name[nl] = '\0';
             val = a + nl + 1;
@@ -3816,7 +3872,7 @@ static int parse_options(int argc, char **argv, int start, opts *o,
         do {                                                           \
             if (!val) {                                                \
                 if (++i >= argc)                                       \
-                    return fail("missing value for %s", a);            \
+                    return failc(RC_USAGE, "missing value for %s", a);            \
                 val = argv[i];                                         \
             }                                                          \
         } while (0)
@@ -3837,7 +3893,7 @@ static int parse_options(int argc, char **argv, int start, opts *o,
             NEED_VALUE();
             id = comp_lookup(val);
             if (id < 0)
-                return fail("unknown compression '%s' (lzma2, zstd, none)",
+                return failc(RC_USAGE, "unknown compression '%s' (lzma2, zstd, none)",
                             val);
             o->compress = id;
         } else if (!strcmp(a, "--no-compress")) {
@@ -3850,13 +3906,13 @@ static int parse_options(int argc, char **argv, int start, opts *o,
             uint64_t lv;
             NEED_VALUE();
             if (dec_to_u64(val, &lv) || lv > 22)
-                return fail("invalid compression level");
+                return failc(RC_USAGE, "invalid compression level");
             o->level = (int)lv;
         } else if (!strcmp(a, "-T") || !strcmp(a, "--threads")) {
             uint64_t th;
             NEED_VALUE();
             if (dec_to_u64(val, &th) || th > BENC_MAX_THREADS)
-                return fail("invalid thread count");
+                return failc(RC_USAGE, "invalid thread count");
             o->threads = (long)th;
         } else if (!strcmp(a, "-f") || !strcmp(a, "--force")) {
             o->force = 1;
@@ -3873,7 +3929,7 @@ static int parse_options(int argc, char **argv, int start, opts *o,
             printf("%s %s\n", BENC_NAME, BENC_VERSION);
             return 2;
         } else {
-            return fail("unknown option '%s'", a);
+            return failc(RC_USAGE, "unknown option '%s'", a);
         }
 #undef NEED_VALUE
     }
@@ -3931,9 +3987,10 @@ int main(int argc, char **argv)
     int npos = 0, consumed = 0, rc, mode_dec = 0, i;
 
     b64_init();
+    g_exit = 0;
     if (argc < 2) {
         usage(stderr);
-        return 1;
+        return RC_USAGE;
     }
     for (i = 1; i < argc; i++)
         if (!strcmp(argv[i], "-q") || !strcmp(argv[i], "--quiet"))
@@ -3959,12 +4016,12 @@ int main(int argc, char **argv)
     if (rc == 2)
         return 0;
     if (rc)
-        return 1;
+        return g_exit ? g_exit : RC_USAGE;
     ui_init(o.quiet);
 
     if (cmd == C_INFO) {
         if (npos != 1)
-            return fail("info requires exactly one file");
+            return failc(RC_USAGE, "info requires exactly one file");
         return cmd_info(pos[0]);
     }
     if (npos < 1 || npos > 2)
@@ -3972,13 +4029,13 @@ int main(int argc, char **argv)
                                   : "expected <input> [output] after the command");
     in_path = pos[0];
     if (o.output && npos == 2)
-        return fail("output given twice");
+        return failc(RC_USAGE, "output given twice");
     out_path = o.output ? o.output : (npos == 2 ? pos[1] : NULL);
 
     if (cmd == C_AUTO) {
         int is_ctr = detect_container(in_path);
         if (is_ctr < 0)
-            return fail_errno("cannot open input", in_path);
+            return failc_errno(RC_INPUT, "cannot open input", in_path);
         mode_dec = (is_ctr == 1 || is_ctr == 2);
     } else {
         mode_dec = (cmd == C_DEC);
@@ -3999,10 +4056,10 @@ int main(int argc, char **argv)
                 ) {
                 fp = fopen(in_path, "rb");
                 if (!fp)
-                    return fail_errno("cannot open input", in_path);
+                    return failc_errno(RC_INPUT, "cannot open input", in_path);
                 if (parse_header(fp, &probe)) {
                     fclose(fp);
-                    return 1;
+                    return g_exit ? g_exit : RC_FORMAT;
                 }
                 fclose(fp);
                 if (probe.name_len)
@@ -4012,7 +4069,7 @@ int main(int argc, char **argv)
                 allocated = default_decrypt_output(in_path);
         }
         if (!allocated)
-            return fail("out of memory");
+            return failc(RC_NOMEM, "out of memory");
         out_path = allocated;
     }
 

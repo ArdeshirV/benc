@@ -252,11 +252,27 @@ codec, level or input kind invalidates the tag just like changing the salt.
 
 ## Exit codes
 
+`benc` returns a specific, stable exit code for each failure class so scripts
+can react without parsing messages.
+
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
-| 1 | usage error, I/O error, or malformed container |
-| 2 | authentication failure (wrong password or modified file) |
+| 1 | unspecified error (e.g. internal failure or weak-random warning path) |
+| 2 | authentication failure: wrong password or tampered container |
+| 3 | usage error: bad/unknown option, missing or extra arguments |
+| 4 | input error: input cannot be opened or read, or input == output |
+| 5 | output error: cannot create/write output, or it exists without `-f` |
+| 6 | format error: not a benc file, malformed header, bad base64, truncated |
+| 7 | unsupported container: version, KDF, cipher, authenticator or codec |
+| 8 | out of memory |
+| 9 | password problem: missing, empty, too long or too many attempts |
+| 10 | compression/decompression failure, or directory pack/unpack failure |
+| 11 | built-in self-test (`benc selftest`) reported failures |
+
+A run interrupted by a signal keeps the conventional shell status of
+`128 + signal` (for example `130` for `SIGINT`), after cleaning up any
+half-written output.
 
 ## Build
 

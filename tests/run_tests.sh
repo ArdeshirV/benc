@@ -142,7 +142,7 @@ if [ "$rc" -ne 0 ]; then ok "foreign file is rejected"; else bad "foreign file i
 echo "== overwrite protection =="
 "$BENC" encrypt -q -f --textout -p "$PW" "$WORK/text.txt" -o "$WORK/text.txt.bct" >/dev/null 2>&1
 "$BENC" encrypt -q -p "$PW" "$WORK/text.txt" -o "$WORK/text.txt.bct" >/dev/null 2>&1
-expect_rc "existing output requires -f" 1 $?
+expect_rc "existing output requires -f" 5 $?
 "$BENC" encrypt -q -f --textout -p "$PW" "$WORK/text.txt" -o "$WORK/text.txt.bct" >/dev/null 2>&1
 expect_rc "force overwrites" 0 $?
 
@@ -303,6 +303,15 @@ if [ "$badflip" -eq 0 ]; then
 else
     bad "$badflip of $total header byte flips were accepted"
 fi
+
+echo "== exit codes =="
+"$BENC" --definitely-not-an-option >/dev/null 2>&1
+expect_rc "usage error exits 3" 3 $?
+"$BENC" decrypt -p "$PW" "$WORK/does-not-exist.bcb" >/dev/null 2>&1
+expect_rc "missing input exits 4" 4 $?
+printf 'not a benc file\n' > "$WORK/foreign.dat"
+"$BENC" decrypt -p "$PW" "$WORK/foreign.dat" >/dev/null 2>&1
+expect_rc "foreign container exits 6" 6 $?
 
 echo
 if [ "$FAILED" -eq 0 ]; then
