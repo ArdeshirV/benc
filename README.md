@@ -19,25 +19,29 @@ file is detected by its magic and decrypted transparently. Pass `-b` /
 $ benc notes.pdf
 Password:
 Repeat password:
-Encrypted notes.pdf -> notes.pdf.bcb
+Encrypted notes.pdf -> notes.pdf.bcb  (16 B, 0.2 s)
 
 $ benc notes.pdf.bcb
 Password:
-Decrypted notes.pdf.bcb -> notes.pdf
+Decrypted notes.pdf.bcb -> notes.pdf  (16 B, 0.2 s)
 
 $ benc --textout notes.pdf
 Password:
 Repeat password:
-Encrypted notes.pdf -> notes.pdf.bct
+Encrypted notes.pdf -> notes.pdf.bct  (16 B, 0.2 s)
 
 $ benc --textout notes.pdf.bct
 Password:
-Decrypted notes.pdf.bct -> notes.pdf
+Decrypted notes.pdf.bct -> notes.pdf  (16 B, 0.2 s)
 
 $ benc photos/                    # a directory is packed into a tar first
-Encrypted photos -> photos.bcb
+Password:
+Repeat password:
+Encrypted photos/ -> photos.bcb  (129 B, 0.3 s)
+
 $ benc photos.bcb                # ... and unpacked again afterwards
-Decrypted photos.bcb -> photos
+Password:
+Extracted photos.bcb -> photos  (129 B, 0.3 s)
 ```
 
 Encryption is self-contained: SHA-256, HMAC, PBKDF2, ChaCha20, base64 and
