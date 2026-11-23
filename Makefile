@@ -336,6 +336,25 @@ else
 	@exit 1
 endif
 
+# ---------------------------------------------------------- termux-arm64 ----
+termux-arm64:
+ifeq ($(HOST),termux)
+	@mkdir -p $(BUILD)/termux-arm64
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+else ifneq ($(TERMUX_CC),)
+	@command -v $(TERMUX_CC) >/dev/null 2>&1 || { \
+	  echo "termux-arm64: $(TERMUX_CC) not found." >&2; \
+	  echo "  install the Android NDK clang, or set TERMUX_CC=/path/to/aarch64-linux-android21-clang" >&2; \
+	  echo "  or set TERMUX_CC=aarch64-linux-android21-clang" >&2; \
+	  exit 1; }
+	@mkdir -p $(BUILD)/termux-arm64
+	$(TERMUX_CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+else
+	@echo "termux-arm64: run this in Termux, or set TERMUX_CC (Android NDK clang," >&2
+	@echo "        e.g. TERMUX_CC=aarch64-linux-android21-clang)" >&2
+	@exit 1
+endif
+
 # ----------------------------------------------------------------- bsd ----
 bsd:
 ifeq ($(HOST),bsd)
@@ -498,7 +517,7 @@ else
 	@logs=$$(mktemp -d 2>/dev/null || echo ./.benc-logs); mkdir -p "$$logs"; \
 	built=0; skipped=0; failed=0; \
 	for p in linux linux-386 linux-amd64 linux-arm linux-arm64 macos macos-amd64 macos-arm64 \
-	    termux bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 windows-amd64 windows-386 \
+	    termux termux-arm64 bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 windows-amd64 windows-386 \
 	    windows-arm windows-arm64 dos; do \
 	    printf '  %-16s ' "$$p"; \
 	    if $(MAKE) --no-print-directory $$p >"$$logs/$$p.log" 2>&1; then \
@@ -531,6 +550,7 @@ check:
 	@printf '%-14s: %s\n' "dos"           "$(if $(shell command -v $(DOS_CC) 2>/dev/null),$(DOS_CC),not found)"
 	@printf '%-14s: %s\n' "macos"         "$(if $(MACOS_CC),$(MACOS_CC),$(if $(filter macos,$(HOST)),native cc,not found))"
 	@printf '%-14s: %s\n' "termux"        "$(if $(TERMUX_CC),$(TERMUX_CC),not found)"
+	@printf '%-14s: %s\n' "termux-arm64"   "$(if $(TERMUX_CC),$(TERMUX_CC),not found)"
 	@printf '%-14s: %s\n' "bsd"           "$(if $(BSD_CC),$(BSD_CC),not found)"
 	@printf '%-14s: %s\n' "linux-386"     "$(if $(LINUX_386_CC),$(LINUX_386_CC),not set)"
 	@printf '%-14s: %s\n' "linux-amd64"   "$(if $(LINUX_AMD64_CC),$(LINUX_AMD64_CC),not set)"
