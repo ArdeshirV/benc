@@ -81,7 +81,7 @@
 #define BENC_B64_BLOCK    48            /* input bytes per output line    */
 #define BENC_B64_COLS     64            /* base64 characters per line     */
 
-#if defined(BENC_DOS)
+#if BENC_DOS
 #  define BENC_CHUNK      (BENC_B64_BLOCK * 128)       /* 6 KiB           */
 #  define BENC_RBUF       4096
 #  define BENC_OBUF       1536
@@ -263,7 +263,7 @@ static void ui_init(int quiet)
     int w = 0;
 
     ui_tty = benc_isatty(2) != 0;
-#if defined(BENC_POSIX)
+#if BENC_POSIX
 #  ifdef TIOCGWINSZ
     {
         struct winsize ws;
@@ -276,7 +276,7 @@ static void ui_init(int quiet)
         if (c)
             w = atoi(c);
     }
-#elif defined(BENC_WINDOWS)
+#elif BENC_WINDOWS
     {
         CONSOLE_SCREEN_BUFFER_INFO ci;
         if (GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE), &ci))
@@ -395,7 +395,7 @@ static void progress_draw(const progress *p)
     char a[24], b[24], pctbuf[8];
     static const char spin[] = { '|', '/', '-', '\\' };
     static unsigned spin_i;
-    unsigned long el = now_ms() - p->t0;
+    unsigned long el = benc_now_ms() - p->t0;
     uint64_t bps = (el > 0) ? (p->done * 1000u) / el : 0;
     char sp = g_force_spin ? g_force_spin : spin[spin_i++ & 3u];
     int pct = 0, level, fill, i, bw, fixed;
@@ -501,7 +501,7 @@ static void progress_begin(progress *p, const char *label, uint64_t total,
     p->total = total;
     p->done = 0;
     p->bytes = bytes;
-    p->t0 = p->last = now_ms();
+    p->t0 = p->last = benc_now_ms();
     if (ui_live)
         progress_draw(p);
 }
@@ -513,7 +513,7 @@ static void progress_set(progress *p, uint64_t done)
     p->done = done;
     if (!ui_live)
         return;
-    t = now_ms();
+    t = benc_now_ms();
     if (t - p->last < BENC_PROGRESS_MS)
         return;
     p->last = t;
@@ -1174,7 +1174,7 @@ static int b64_decode(const char *s, uint8_t *out, size_t cap, size_t *outlen)
 
 static int benc_random_weak;
 
-#if !defined(BENC_WINDOWS) && !defined(BENC_POSIX)
+#if !BENC_WINDOWS && !BENC_POSIX
 
 /* DOS and other targets without an OS entropy source: a SHA-256 pool fed
  * with timers, addresses and (see entropy_event) the timing of every
@@ -1226,9 +1226,9 @@ static void entropy_event(void)
 static void entropy_event(void) { }
 #endif
 
-static int benc_random(uint8_t *buf, size_t len)
+int benc_random(uint8_t *buf, size_t len)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     typedef BOOLEAN (WINAPI *rtlgenrandom_fn)(PVOID, ULONG);
     static rtlgenrandom_fn fn;
     static int tried;
@@ -1249,7 +1249,7 @@ static int benc_random(uint8_t *buf, size_t len)
         len -= n;
     }
     return 0;
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     FILE *fp = fopen("/dev/urandom", "rb");
     size_t got;
 
@@ -1734,20 +1734,6 @@ static int count_push(void *vctx, uint8_t *data, size_t len)
 /* files and paths                                                     */
 /* ------------------------------------------------------------------ */
 
-#if defined(BENC_WINDOWS)
-typedef __int64 benc_off_t;
-#  define benc_fseek(fp, off, wh) _fseeki64((fp), (off), (wh))
-#  define benc_ftell(fp)          _ftelli64(fp)
-#elif defined(BENC_POSIX)
-typedef off_t benc_off_t;
-#  define benc_fseek(fp, off, wh) fseeko((fp), (benc_off_t)(off), (wh))
-#  define benc_ftell(fp)          ((benc_off_t)ftello(fp))
-#else
-typedef long benc_off_t;
-#  define benc_fseek(fp, off, wh) fseek((fp), (long)(off), (wh))
-#  define benc_ftell(fp)          ((benc_off_t)ftell(fp))
-#endif
-
 static int file_exists(const char *path)
 {
     FILE *fp = fopen(path, "rb");
@@ -1762,10 +1748,10 @@ static int file_exists(const char *path)
 /* devices and pipes cannot be replaced atomically: write to them directly */
 static int is_regular_file(const char *path)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     DWORD a = GetFileAttributesA(path);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     struct stat st;
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 #else
@@ -1776,10 +1762,10 @@ static int is_regular_file(const char *path)
 
 static int is_directory(const char *path)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     DWORD a = GetFileAttributesA(path);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 #else
@@ -1790,12 +1776,12 @@ static int is_directory(const char *path)
 
 static int same_file(const char *a, const char *b)
 {
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     struct stat sa, sb;
     if (stat(a, &sa) == 0 && stat(b, &sb) == 0)
         return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
     return strcmp(a, b) == 0;
-#elif defined(BENC_WINDOWS) || defined(BENC_DOS)
+#elif BENC_WINDOWS || BENC_DOS
     return ci_equal(a, b);
 #else
     return strcmp(a, b) == 0;
@@ -1815,7 +1801,7 @@ static int stream_size(FILE *fp, uint64_t *size)
     return 0;
 }
 
-#if defined(BENC_POSIX)
+#if BENC_POSIX
 static int copy_file(const char *from, const char *to)
 {
     FILE *in = fopen(from, "rb");
@@ -1853,10 +1839,7 @@ static int copy_file(const char *from, const char *to)
 
 static int rename_over(const char *from, const char *to)
 {
-#if !defined(BENC_POSIX)
-    remove(to);                      /* rename() cannot overwrite here */
-    return rename(from, to);
-#else
+#if BENC_POSIX
     if (rename(from, to) == 0)
         return 0;
     /* staging lives in RAM (/dev/shm) but the target is on disk: copy */
@@ -1865,6 +1848,9 @@ static int rename_over(const char *from, const char *to)
         return 0;
     }
     return -1;
+#else
+    remove(to);                      /* rename() cannot overwrite here */
+    return rename(from, to);
 #endif
 }
 
@@ -1880,7 +1866,7 @@ static char *xstrdup_cat(const char *a, size_t alen, const char *b)
     return p;
 }
 
-#if defined(BENC_DOS)
+#if BENC_DOS
 /* DOS file names are 8.3: replace the extension instead of appending */
 static size_t stem_len(const char *path)
 {
@@ -1892,7 +1878,7 @@ static size_t stem_len(const char *path)
 
 static char *default_encrypt_output(const char *in)
 {
-#if defined(BENC_DOS)
+#if BENC_DOS
     return xstrdup_cat(in, stem_len(in), ".BNC");
 #else
     return xstrdup_cat(in, strlen(in), ".benc");
@@ -1905,7 +1891,7 @@ static char *default_decrypt_output(const char *in)
 
     if (n > 5 && ci_equal(in + n - 5, ".benc"))
         return xstrdup_cat(in, n - 5, "");
-#if defined(BENC_DOS)
+#if BENC_DOS
     return xstrdup_cat(in, stem_len(in), ".DEC");
 #else
     return xstrdup_cat(in, n, ".dec");
@@ -1928,7 +1914,7 @@ static char *stored_name_output(const char *in, const char *stored)
  * plaintext never lands on a (recoverable) disk location. */
 static const char *ram_temp_dir(void)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     static char buf[512];
     DWORD n;
 
@@ -1936,7 +1922,7 @@ static const char *ram_temp_dir(void)
     if (n > 0 && (size_t)n < sizeof buf)
         return buf;
     return "C:\\Windows\\Temp";
-#elif defined(BENC_DOS)
+#elif BENC_DOS
     return "/tmp";
 #else
     return "/dev/shm";
@@ -1957,7 +1943,7 @@ static void stage_forget(void)
     for (i = 0; i < BENC_MAX_STAGE; i++) {
         if (!g_stage[i][0])
             continue;
-#if defined(BENC_POSIX)
+#if BENC_POSIX
         unlink(g_stage[i]);
 #else
         remove(g_stage[i]);
@@ -1978,7 +1964,7 @@ static void stage_remember(const char *p)
         }
     }
 }
-#if defined(BENC_POSIX)
+#if BENC_POSIX
 static struct termios g_tio;
 static volatile int g_tio_saved;
 #endif
@@ -1989,12 +1975,12 @@ static void on_signal(int sig)
     char out[UI_MAXW + 4];
     int n = ui_len, i, p = 0;
 
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     if (g_tio_saved)
         tcsetattr(0, TCSAFLUSH, &g_tio);
 #endif
     if (g_tmp[0]) {
-#if defined(BENC_POSIX)
+#if BENC_POSIX
         unlink(g_tmp);
 #else
         remove(g_tmp);
@@ -2006,7 +1992,7 @@ static void on_signal(int sig)
         for (i = 0; i < n; i++)
             out[p++] = ' ';
         out[p++] = '\r';
-#if defined(BENC_POSIX)
+#if BENC_POSIX
         (void)!write(2, out, (size_t)p);
 #else
         fwrite(out, 1, (size_t)p, stderr);
@@ -2058,9 +2044,9 @@ typedef struct {
 /* read one key press without echo; -1 on EOF */
 static int kb_getc(void)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     return _getch();
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     unsigned char c;
     return read(0, &c, 1) == 1 ? (int)c : -1;
 #elif defined(__ia16__)
@@ -2079,7 +2065,7 @@ static int read_secret(char *buf, size_t cap)
     size_t n = 0;
     int typed = 0, shown = 0, too_long = 0, c;
 
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     struct termios nt;
     if (tcgetattr(0, &g_tio) == 0) {
         nt = g_tio;
@@ -2131,7 +2117,7 @@ static int read_secret(char *buf, size_t cap)
             n = 0;
             typed = 0;
             too_long = 0;
-#if defined(BENC_POSIX)
+#if BENC_POSIX
             if (c == 27) {                          /* swallow ESC [ x */
                 int c2 = kb_getc();
                 if (c2 == '[' || c2 == 'O') {
@@ -2143,7 +2129,7 @@ static int read_secret(char *buf, size_t cap)
             continue;
         }
         if (c == 0 || c == 224) {                   /* DOS/Win function key */
-#if !defined(BENC_POSIX)
+#if !BENC_POSIX
             (void)kb_getc();
 #endif
             continue;
@@ -2165,7 +2151,7 @@ static int read_secret(char *buf, size_t cap)
         }
     }
 done:
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     if (g_tio_saved) {
         tcsetattr(0, TCSAFLUSH, &g_tio);
         g_tio_saved = 0;
@@ -2319,7 +2305,7 @@ static char *stage_path(const char *fname, const char *tag)
             return NULL;
         }
     }
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     {
         int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
         if (fd < 0) {
@@ -2352,7 +2338,7 @@ static void stage_progress_cb(unsigned long long done, unsigned long long total,
     if (pg->total == 0 && total > 0) {
         pg->total = (uint64_t)total;
         progress_draw(pg);
-        pg->last = now_ms();
+        pg->last = benc_now_ms();
     }
     progress_set(pg, (uint64_t)done);
     if (pg->total && done >= pg->total)
@@ -2434,10 +2420,10 @@ static int make_directory(const char *path)
         return 0;
     if (file_exists(path))
         return fail("'%s' exists and is not a directory", path);
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     if (_mkdir(path) != 0 && !is_directory(path))
         return fail_errno("cannot create directory", path);
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     if (mkdir(path, 0777) != 0 && !is_directory(path))
         return fail_errno("cannot create directory", path);
 #else
@@ -2451,7 +2437,7 @@ static int make_directory(const char *path)
  * (disk) destination without leaking plaintext to disk in between. */
 static int copy_tree(const char *src, const char *dst)
 {
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     DIR *d = opendir(src);
     struct dirent *e;
     struct stat st;
@@ -2576,7 +2562,7 @@ static void report_result(const opts *o, const char *verb,
         return;
     }
     fmt_size(bytes, sz);
-    fmt_secs(now_ms() - t0, tm);
+    fmt_secs(benc_now_ms() - t0, tm);
     ui_final("%s %s -> %s  (%s, %s)%s", verb, in_path, out_path, sz, tm, note);
 }
 
@@ -2656,7 +2642,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     b64_w w;
     progress pg;
     uint64_t done = 0;
-    unsigned long t0 = now_ms();
+    unsigned long t0 = benc_now_ms();
     int rc = RC_ERR, direct = 0, inter, w_ok = 0, archive = 0;
     int comp = o->compress, level, threads;
     size_t n;
@@ -2869,7 +2855,7 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
         return -1;
     }
     snprintf(xdir, strlen(ram_temp_dir()) + 64, "%s/benc-dir-%u",
-             ram_temp_dir(), (unsigned)now_ms());
+             ram_temp_dir(), (unsigned)benc_now_ms());
     if (make_directory(xdir))
         goto out;
     progress_begin(&pg, "Unpacking", 0, 1);
@@ -2898,7 +2884,7 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
         return -1;
     }
     free(childp);
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     {
         char rmcmd[8192];
         int r;
@@ -2906,7 +2892,7 @@ static int decrypt_unpack_archive(const char *tar, const char *in_path,
         r = system(rmcmd);
         (void)r;
     }
-#elif defined(BENC_WINDOWS)
+#elif BENC_WINDOWS
     _rmdir(xdir);
 #else
     remove(xdir);
@@ -2932,7 +2918,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
     plain_ctx plain;
     progress pg;
     uint64_t cipher_len = 0, fsize = 0, hdr_end;
-    unsigned long t0 = now_ms();
+    unsigned long t0 = benc_now_ms();
     int rc = RC_ERR, direct = 0, inter = 0, tries, r, post;
 
     memset(&h, 0, sizeof h);
@@ -3397,7 +3383,7 @@ static void usage(FILE *fp)
         "  The output is always a plain ASCII text file.\n",
         BENC_NAME, BENC_VERSION, BENC_NAME, BENC_NAME, BENC_NAME, BENC_NAME,
         BENC_NAME,
-#if defined(BENC_DOS)
+#if BENC_DOS
         "<input>.BNC", "the stored name",
 #else
         "<input>.benc", "strips .benc",
@@ -3612,7 +3598,7 @@ int main(int argc, char **argv)
             FILE *fp;
 
             if (o.use_header_name
-#if defined(BENC_DOS)
+#if BENC_DOS
                 || 1
 #endif
                 ) {

@@ -296,6 +296,7 @@ only small files fit in memory; see [16-bit DOS](#16-bit-dos).
 
 ```
 benc.c               CLI, container format and encryption core
+benc_platform.h      platform abstraction layer (OS, tty, file, path, entropy)
 benc_codecs.c        native LZMA2 and Zstd codecs
 benc_tar.c           built-in tar for directory payloads
 Makefile             cross-platform build

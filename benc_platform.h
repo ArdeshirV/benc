@@ -10,13 +10,6 @@
 #include <string.h>
 #include <time.h>
 
-#if defined(BENC_WINDOWS)
-#  define WIN32_LEAN_AND_MEAN
-#  include <windows.h>
-#  include <io.h>
-#  include <fcntl.h>
-#endif
-
 /* ---------------------------------------------------------------- */
 /* feature macros                                                    */
 /* ---------------------------------------------------------------- */
@@ -35,15 +28,32 @@
 #  define BENC_DOS     0
 #endif
 
+#if BENC_WINDOWS
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <io.h>
+#  include <fcntl.h>
+#elif BENC_POSIX
+#  include <unistd.h>
+#  include <sys/types.h>
+#  include <sys/stat.h>
+#  include <sys/time.h>
+#  include <sys/ioctl.h>
+#  include <sys/wait.h>
+#  include <fcntl.h>
+#  include <dirent.h>
+#  include <termios.h>
+#endif
+
 /* ---------------------------------------------------------------- */
 /* integer types                                                     */
 /* ---------------------------------------------------------------- */
 
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
 typedef __int64 benc_off_t;
 #  define benc_fseek(fp, off, wh) _fseeki64((fp), (off), (wh))
 #  define benc_ftell(fp)          _ftelli64(fp)
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
 typedef off_t benc_off_t;
 #  define benc_fseek(fp, off, wh) fseeko((fp), (benc_off_t)(off), (wh))
 #  define benc_ftell(fp)          ((benc_off_t)ftello(fp))
@@ -59,14 +69,14 @@ typedef long benc_off_t;
 
 static inline unsigned long benc_now_ms(void)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     return (unsigned long)GetTickCount();
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     struct timeval tv;
     if (gettimeofday(&tv, NULL) != 0)
         return 0;
     return (unsigned long)tv.tv_sec * 1000ul + (unsigned long)(tv.tv_usec / 1000);
-#elif defined(__DJGPP__)
+#elif BENC_DOS
     return (unsigned long)((unsigned long)clock() * 1000ul / (unsigned long)CLOCKS_PER_SEC);
 #else
     return (unsigned long)time(NULL) * 1000ul;
@@ -79,7 +89,7 @@ static inline unsigned long benc_now_ms(void)
 
 static inline int benc_isatty(int fd)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     return _isatty(fd);
 #else
     return isatty(fd);
@@ -88,12 +98,12 @@ static inline int benc_isatty(int fd)
 
 static inline int benc_get_terminal_width(void)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     CONSOLE_SCREEN_BUFFER_INFO ci;
     if (GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE), &ci))
         return ci.srWindow.Right - ci.srWindow.Left + 1;
     return 0;
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     int w = 0;
 #ifdef TIOCGWINSZ
     struct winsize ws;
@@ -133,10 +143,10 @@ static inline int benc_file_exists(const char *path)
 
 static inline int benc_is_regular_file(const char *path)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     DWORD a = GetFileAttributesA(path);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     struct stat st;
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 #else
@@ -147,10 +157,10 @@ static inline int benc_is_regular_file(const char *path)
 
 static inline int benc_is_directory(const char *path)
 {
-#if defined(BENC_WINDOWS)
+#if BENC_WINDOWS
     DWORD a = GetFileAttributesA(path);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-#elif defined(BENC_POSIX)
+#elif BENC_POSIX
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 #else
@@ -161,7 +171,7 @@ static inline int benc_is_directory(const char *path)
 
 static inline int benc_same_file(const char *a, const char *b)
 {
-#if defined(BENC_POSIX)
+#if BENC_POSIX
     struct stat sa, sb;
     if (stat(a, &sa) == 0 && stat(b, &sb) == 0)
         return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
@@ -208,37 +218,66 @@ static inline const char *benc_base_name(const char *path)
 
 const char *benc_ram_temp_dir(void);
 
+int benc_copy_file(const char *from, const char *to);
+
 static inline int benc_rename_over(const char *from, const char *to)
 {
-#if !defined(BENC_WINDOWS) && !defined(BENC_POSIX)
+#if BENC_WINDOWS || !BENC_POSIX
     remove(to);
     return rename(from, to);
 #else
     if (rename(from, to) == 0)
         return 0;
     /* staging lives in RAM (/dev/shm) but the target is on disk: copy */
-#if defined(BENC_POSIX)
     if (benc_copy_file(from, to) == 0) {
         remove(from);
         return 0;
     }
-#else
-    remove(to);
-    return rename(from, to);
-#endif
     return -1;
 #endif
 }
 
-#if defined(BENC_POSIX)
-int benc_copy_file(const char *from, const char *to);
+#if BENC_POSIX
+int benc_copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb");
+    FILE *out;
+    unsigned char buf[65536];
+    size_t n;
+
+    if (!in)
+        return -1;
+    out = fopen(to, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            return -1;
+        }
+    }
+    if (ferror(in)) {
+        fclose(in);
+        fclose(out);
+        return -1;
+    }
+    if (fclose(out) != 0) {
+        fclose(in);
+        return -1;
+    }
+    fclose(in);
+    return 0;
+}
 #endif
 
 /* ---------------------------------------------------------------- */
 /* signals (POSIX only)                                               */
 /* ---------------------------------------------------------------- */
 
-#if defined(BENC_POSIX)
+#if BENC_POSIX
 void benc_install_signals(void);
 void benc_save_terminal(void);
 void benc_restore_terminal(void);
