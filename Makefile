@@ -493,9 +493,9 @@ else
 	@command -v $(WINARM_CC) >/dev/null 2>&1 || { \
 	  echo "windows-arm: $(WINARM_CC) not found." >&2; \
 	  echo "  set WINARM_CC=/path/to/arm-w64-mingw32-gcc" >&2; exit 1; }
-	@mkdir -p $(BUILD)/windows-arm
+	$(call WIN_RESOURCE,windows-arm,$(WINDRESARM))
 	$(WINARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-arm/$(APP).exe \
-	    $(SRC) $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BUILD)/windows-arm/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 endif
 
 # ---------------------------------------------------------- windows-arm64 ----
@@ -506,9 +506,9 @@ else
 	@command -v $(WINARM64_CC) >/dev/null 2>&1 || { \
 	  echo "windows-arm64: $(WINARM64_CC) not found." >&2; \
 	  echo "  set WINARM64_CC=/path/to/aarch64-w64-mingw32-gcc" >&2; exit 1; }
-	@mkdir -p $(BUILD)/windows-arm64
+	$(call WIN_RESOURCE,windows-arm64,$(WINDRESARM64))
 	$(WINARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-arm64/$(APP).exe \
-	    $(SRC) $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BUILD)/windows-arm64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 endif
 
 # Build with MSVC from a "Developer Command Prompt for VS" that also has GNU
