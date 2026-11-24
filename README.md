@@ -21,7 +21,7 @@
 
 ## 🔐 Technical Summary
 
-> **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum ML-KEM-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, FreeBSD, and DOS** with no runtime dependencies (liboqs stays strictly optional).
+> **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum ML-KEM-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, FreeBSD, and DOS** with **no runtime dependencies at all** — ML-KEM-768 is implemented natively in-tree.
 
 ---
 
@@ -113,7 +113,7 @@ benc -t notes.pdf                         # force ASCII text container
 benc -n notes.pdf.bcb                    # restore the stored file name on decrypt
 ```
 
-**Post-quantum (container format version 5, tool version 1.5.0):**
+**Post-quantum (container format version 5, tool version 1.6.0):**
 
 ```console
 $ benc --keygen --kem ml-kem-768 --output kem    # generate an ML-KEM-768 key pair
@@ -299,7 +299,7 @@ Size: <bytes or ->
   KMAC256) and are rejected by `parse_header` with an *unsupported key
   derivation function* error.
 - 📦 **Version 5** is the current container format written by tool version
-  **1.5.0**: it extends the version 4 field order with the post-quantum fields
+  **1.6.0**: it extends the version 4 field order with the post-quantum fields
   `Mode`, `KEM`, `KEM-Public-Key` and `KEM-Ciphertext`. Older version 1 and 4
   containers are still readable.
 - 📦 The body is the payload, encrypted, followed by a 32-byte tag, base64
@@ -338,7 +338,7 @@ codec, level or input kind invalidates the tag just like changing the salt.
 <a id="post-quantum-container-v5"></a>
 ## 🌌 Post-quantum container (version 5)
 
-Version **5** — written by tool version **1.5.0** — extends the version 4 header
+Version **5** — written by tool version **1.6.0** — extends the version 4 header
 with three post-quantum fields:
 
 ```text
@@ -358,10 +358,10 @@ The KEM public key and ciphertext are base64 in the header and are covered by
 the HMAC tag like every other authenticated header field. The matching command
 line options are `--kem`, `--key`, `--hybrid` and `--keygen`.
 
-> ℹ️ The ML-KEM-768 backend wraps the
-> [liboqs](https://github.com/open-quantum-safe/liboqs) library and is compiled
-> only when the Makefile defines `BENC_WITH_MLKEM`; without it the tool stays in
-> password-only mode and the post-quantum options are not offered.
+> ℹ️ ML-KEM-768 is implemented **natively** in `benc_kem.c` (FIPS 203) — no
+> external library is required and the post-quantum options are always available.
+> Full correctness verification against the FIPS 203 test vectors is ongoing;
+> the password-based path remains the recommended, fully-verified mode.
 
 ---
 
@@ -511,8 +511,12 @@ payloads are stored uncompressed and only small files fit in memory — see
 ```text
 benc.c               CLI, container format and encryption core
 benc_platform.h      platform abstraction layer (OS, tty, file, path, entropy)
+benc_kem.c           native ML-KEM-768 (FIPS 203) post-quantum key encapsulation
+benc_kem.h           KEM public interface
 benc_codecs.c        native LZMA2 and Zstd codecs
+benc_codecs.h        codec interface
 benc_tar.c           built-in tar for directory payloads
+benc_tar.h           tar interface
 benc.rc              Windows resource script (icon + version info)
 img/benc.ico         Windows application icon
 img/benc.png         project icon used in this README
