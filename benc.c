@@ -60,7 +60,7 @@
 /* ------------------------------------------------------------------ */
 
 #define BENC_NAME         "benc"
-#define BENC_VERSION      "1.4.0"
+#define BENC_VERSION      "1.4.1"
 #define BENC_FMT_VERSION  5u          /* what new containers are written as */
 #define BENC_FMT_V4       4u          /* previous container format */
 #define BENC_FMT_LEGACY   1u          /* oldest container still readable    */

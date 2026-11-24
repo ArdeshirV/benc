@@ -109,7 +109,7 @@ benc -t notes.pdf                         # force ASCII text container
 benc -n notes.pdf.bcb                    # restore the stored file name on decrypt
 ```
 
-**Post-quantum (container format version 5, tool version 1.4.0):**
+**Post-quantum (container format version 5, tool version 1.4.1):**
 
 ```console
 $ benc --keygen --kem ml-kem-768 --output kem    # generate an ML-KEM-768 key pair
@@ -295,7 +295,7 @@ Size: <bytes or ->
   KMAC256) and are rejected by `parse_header` with an *unsupported key
   derivation function* error.
 - 📦 **Version 5** is the current container format written by tool version
-  **1.4.0**: it extends the version 4 field order with the post-quantum fields
+  **1.4.1**: it extends the version 4 field order with the post-quantum fields
   `Mode`, `KEM`, `KEM-Public-Key` and `KEM-Ciphertext`. Older version 1 and 4
   containers are still readable.
 - 📦 The body is the payload, encrypted, followed by a 32-byte tag, base64
@@ -334,7 +334,7 @@ codec, level or input kind invalidates the tag just like changing the salt.
 <a id="post-quantum-container-v5"></a>
 ## 🌌 Post-quantum container (version 5)
 
-Version **5** — written by tool version **1.4.0** — extends the version 4 header
+Version **5** — written by tool version **1.4.1** — extends the version 4 header
 with three post-quantum fields:
 
 ```text
