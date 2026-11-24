@@ -455,6 +455,10 @@ endif
 solaris: bsd
 
 # ------------------------------------------------------------- windows ----
+# The compiled resource object is an intermediate build product; only the
+# final windows executable is kept in the build directory.
+.INTERMEDIATE: $(BUILD)/windows-amd64/benc-res.o $(BUILD)/windows-386/benc-res.o
+
 windows: windows-amd64 windows-386
 
 # Compile the resource script (icon + version info) for a Windows target.
@@ -479,6 +483,7 @@ else
 	$(call WIN_RESOURCE,windows-amd64,$(WINDRES64))
 	$(WIN64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-amd64/$(APP).exe \
 	    $(SRC) $(BUILD)/windows-amd64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	@rm -f $(BUILD)/windows-amd64/benc-res.o
 endif
 
 windows-386:
@@ -492,6 +497,7 @@ else
 	$(call WIN_RESOURCE,windows-386,$(WINDRES32))
 	$(WIN32_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-386/$(APP).exe \
 	    $(SRC) $(BUILD)/windows-386/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	@rm -f $(BUILD)/windows-386/benc-res.o
 endif
 
 # ------------------------------------------------------------ windows-arm ----
@@ -505,6 +511,7 @@ else
 	$(call WIN_RESOURCE,windows-arm,$(WINDRESARM))
 	$(WINARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-arm/$(APP).exe \
 	    $(SRC) $(BUILD)/windows-arm/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	@rm -f $(BUILD)/windows-arm/benc-res.o
 endif
 
 # ---------------------------------------------------------- windows-arm64 ----
@@ -518,6 +525,7 @@ else
 	$(call WIN_RESOURCE,windows-arm64,$(WINDRESARM64))
 	$(WINARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-arm64/$(APP).exe \
 	    $(SRC) $(BUILD)/windows-arm64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	@rm -f $(BUILD)/windows-arm64/benc-res.o
 endif
 
 # Build with MSVC from a "Developer Command Prompt for VS" that also has GNU
