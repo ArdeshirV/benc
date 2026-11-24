@@ -67,6 +67,7 @@ STATIC   ?= 0
 BENC_WITH_MLKEM ?= $(shell pkg-config --exists liboqs 2>/dev/null && echo 1)
 BENC_EXTRA_SRC   = $(if $(BENC_WITH_MLKEM),benc_kem.c,)
 BENC_EXTRA_LIBS  = $(if $(BENC_WITH_MLKEM),-loqs,)
+BENC_DEFS        = $(if $(BENC_WITH_MLKEM),-DBENC_WITH_MLKEM,)
 
 ifeq ($(DEBUG),1)
   CFLAGS := -O0 -g3
@@ -199,7 +200,7 @@ native-optimized: CFLAGS += -march=native
 native-optimized: $(APP)$(EXE)
 
 $(APP)$(EXE): $(SRC) $(HDRS)
-	$(CC) $(CFLAGS) $(WARN) -DBENC_POSIX -o $@ $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS) $(BENC_EXTRA_LIBS)
+	$(CC) $(CFLAGS) $(WARN) -DBENC_POSIX $(BENC_DEFS) -o $@ $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS) $(BENC_EXTRA_LIBS)
 
 # --------------------------------------------------------------- linux ----
 linux:
