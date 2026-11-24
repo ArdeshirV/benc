@@ -66,8 +66,13 @@ STATIC   ?= 0
 # never link liboqs, so they always build password-only).
 BENC_WITH_MLKEM ?= $(shell pkg-config --exists liboqs 2>/dev/null && echo 1)
 BENC_EXTRA_SRC   = $(if $(BENC_WITH_MLKEM),benc_kem.c,)
-BENC_EXTRA_LIBS  = $(if $(BENC_WITH_MLKEM),-loqs,)
 BENC_DEFS        = $(if $(BENC_WITH_MLKEM),-DBENC_WITH_MLKEM,)
+
+ifeq ($(BENC_WITH_MLKEM),1)
+  BENC_EXTRA_LIBS = -Wl,-Bstatic -loqs -Wl,-Bdynamic
+else
+  BENC_EXTRA_LIBS =
+endif
 
 ifeq ($(DEBUG),1)
   CFLAGS := -O0 -g3
