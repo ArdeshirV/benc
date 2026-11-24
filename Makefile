@@ -59,20 +59,11 @@ LDLIBS   ?=
 PREFIX   ?= /usr/local
 STATIC   ?= 0
 
-# ML-KEM-768 (post-quantum key encapsulation), optional via liboqs.
-# liboqs (MIT licensed, FIPS 203 reference implementation) is used only when
-# installed on the build machine.  When it is absent, BENC_WITH_MLKEM is empty
-# and benc builds password-only on every platform (DOS and cross-compiles
-# never link liboqs, so they always build password-only).
-BENC_WITH_MLKEM ?= $(shell pkg-config --exists liboqs 2>/dev/null && echo 1)
-BENC_EXTRA_SRC   = $(if $(BENC_WITH_MLKEM),benc_kem.c,)
-BENC_DEFS        = $(if $(BENC_WITH_MLKEM),-DBENC_WITH_MLKEM,)
-
-ifeq ($(BENC_WITH_MLKEM),1)
-  BENC_EXTRA_LIBS = -Wl,-Bstatic -loqs -Wl,-Bdynamic
-else
-  BENC_EXTRA_LIBS =
-endif
+# ML-KEM-768 (post-quantum key encapsulation) is now implemented natively
+# in benc_kem.c; no external library (liboqs) is required. 100% dependency-free.
+BENC_EXTRA_SRC   = benc_kem.c
+BENC_EXTRA_LIBS  =
+BENC_DEFS        =
 
 ifeq ($(DEBUG),1)
   CFLAGS := -O0 -g3
@@ -488,7 +479,7 @@ else
 	  echo "  or set WIN64_CC=/path/to/x86_64-w64-mingw32-gcc" >&2; exit 1; }
 	$(call WIN_RESOURCE,windows-amd64,$(WINDRES64))
 	$(WIN64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-amd64/$(APP).exe \
-	    $(SRC) $(BUILD)/windows-amd64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BENC_EXTRA_SRC) $(BUILD)/windows-amd64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 	@rm -f $(BUILD)/windows-amd64/benc-res.o
 endif
 
@@ -502,7 +493,7 @@ else
 	  echo "  or set WIN32_CC=/path/to/i686-w64-mingw32-gcc" >&2; exit 1; }
 	$(call WIN_RESOURCE,windows-386,$(WINDRES32))
 	$(WIN32_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-386/$(APP).exe \
-	    $(SRC) $(BUILD)/windows-386/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BENC_EXTRA_SRC) $(BUILD)/windows-386/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 	@rm -f $(BUILD)/windows-386/benc-res.o
 endif
 
@@ -516,7 +507,7 @@ else
 	  echo "  set WINARM_CC=/path/to/arm-w64-mingw32-gcc" >&2; exit 1; }
 	$(call WIN_RESOURCE,windows-arm,$(WINDRESARM))
 	$(WINARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-arm/$(APP).exe \
-	    $(SRC) $(BUILD)/windows-arm/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BENC_EXTRA_SRC) $(BUILD)/windows-arm/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 	@rm -f $(BUILD)/windows-arm/benc-res.o
 endif
 
@@ -530,7 +521,7 @@ else
 	  echo "  set WINARM64_CC=/path/to/aarch64-w64-mingw32-gcc" >&2; exit 1; }
 	$(call WIN_RESOURCE,windows-arm64,$(WINDRESARM64))
 	$(WINARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/windows-arm64/$(APP).exe \
-	    $(SRC) $(BUILD)/windows-arm64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
+	    $(SRC) $(BENC_EXTRA_SRC) $(BUILD)/windows-arm64/benc-res.o $(LDFLAGS) -lbcrypt $(if $(filter 1,$(STATIC)),-static,)
 	@rm -f $(BUILD)/windows-arm64/benc-res.o
 endif
 
@@ -550,7 +541,7 @@ else
 	  echo "  install DJGPP and put its bin directory on PATH," >&2; \
 	  echo "  or set DOS_CC=/path/to/i586-pc-msdosdjgpp-gcc" >&2; exit 1; }
 	@mkdir -p $(BUILD)/dos
-	$(DOS_CC) $(CFLAGS) $(WARN) $(DOS_EXTRA) -o $(BUILD)/dos/$(APP).exe $(SRC) $(LDFLAGS)
+	$(DOS_CC) $(CFLAGS) $(WARN) $(DOS_EXTRA) -o $(BUILD)/dos/$(APP).exe $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS)
 endif
 
 # -------------------------------------------------------- every platform --
