@@ -60,7 +60,7 @@
 /* ------------------------------------------------------------------ */
 
 #define BENC_NAME         "benc"
-#define BENC_VERSION      "1.3.0"
+#define BENC_VERSION      "1.4.0"
 #define BENC_FMT_VERSION  5u          /* what new containers are written as */
 #define BENC_FMT_V4       4u          /* previous container format */
 #define BENC_FMT_LEGACY   1u          /* oldest container still readable    */
@@ -2748,27 +2748,26 @@ static int copy_tree(const char *src, const char *dst)
 /* encrypt / decrypt                                                   */
 /* ------------------------------------------------------------------ */
 
-static void derive_keys(const char *pw, const benc_header *h,
-                        uint8_t enc_key[BENC_KEY_LEN],
-                        uint8_t mac_key[BENC_KEY_LEN], progress *pg,
-                        const uint8_t *ss, size_t ss_len)
+/* Derive the 64 byte file key (cipher key || MAC key) for a container. */
+static void derive_file_key(const char *pw, const benc_header *h,
+                            const uint8_t *ss, size_t ss_len,
+                            uint8_t out[2 * BENC_KEY_LEN], progress *pg)
 {
     uint8_t master[64];
+    uint8_t final_key[2 * BENC_KEY_LEN];
 
     pbkdf2_sha256((const uint8_t *)pw, strlen(pw), h->salt, BENC_SALT_LEN,
                   h->iterations, master, sizeof master, pg);
 
     if (h->mode > 0 && ss && ss_len > 0) {
         uint8_t prk[BENC_KEY_LEN];
-        uint8_t final_key[64];
         static const uint8_t hkdf_info[] = "benc v1.3 hybrid key v1";
 
         if (hkdf_sha256(ss, ss_len, master, sizeof master, hkdf_info,
                        sizeof hkdf_info - 1, prk, BENC_KEY_LEN) == 0 &&
             hkdf_sha256(prk, BENC_KEY_LEN, NULL, 0, hkdf_info,
                         sizeof hkdf_info - 1, final_key, sizeof final_key) == 0) {
-            memcpy(enc_key, final_key, BENC_KEY_LEN);
-            memcpy(mac_key, final_key + BENC_KEY_LEN, BENC_KEY_LEN);
+            memcpy(out, final_key, sizeof final_key);
             benc_wipe(prk, sizeof prk);
             benc_wipe(final_key, sizeof final_key);
             benc_wipe(master, sizeof master);
@@ -2776,9 +2775,21 @@ static void derive_keys(const char *pw, const benc_header *h,
         }
     }
 
-    memcpy(enc_key, master, BENC_KEY_LEN);
-    memcpy(mac_key, master + BENC_KEY_LEN, BENC_KEY_LEN);
+    memcpy(out, master, sizeof master);
     benc_wipe(master, sizeof master);
+}
+
+static void derive_keys(const char *pw, const benc_header *h,
+                        uint8_t enc_key[BENC_KEY_LEN],
+                        uint8_t mac_key[BENC_KEY_LEN], progress *pg,
+                        const uint8_t *ss, size_t ss_len)
+{
+    uint8_t key[2 * BENC_KEY_LEN];
+
+    derive_file_key(pw, h, ss, ss_len, key, pg);
+    memcpy(enc_key, key, BENC_KEY_LEN);
+    memcpy(mac_key, key + BENC_KEY_LEN, BENC_KEY_LEN);
+    benc_wipe(key, sizeof key);
 }
 
 static FILE *open_output(const char *out_path, char **tmp, int *direct)

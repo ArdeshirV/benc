@@ -91,15 +91,18 @@ Decrypted notes.pdf.bct -> notes.pdf  (16 B, 0.2 s)
 $ benc photos/                    # a directory is packed into a tar first
 Password:
 Repeat password:
-Encrypted photos/ -> photos.bcb  (111 B, 0.2 s)
+Encrypted photos/ -> photos.bcb  (159 B, 0.2 s)
 
-$ benc photos.bcb                # ... and unpacked again afterwards
+$ benc photos.bcb                  # ... and unpacked again afterwards
 Password:
-Extracted photos.bcb -> photos  (111 B, 0.2 s)
+Extracted photos.bcb -> photos  (159 B, 0.2 s)
 ```
 
 > ℹ️ Sizes and timings vary with the input and machine. The default output is
 > the binary `.bcb` container; `--textout` selects the ASCII `.bct` container.
+> The interaction line is the only terminal output: the single status line is
+> cleared and redrawn in place while a job runs, and the final result is printed
+> once the job finishes.
 
 ---
 
@@ -270,7 +273,7 @@ Size: <bytes or ->
   KMAC256) and are rejected by `parse_header` with an *unsupported key
   derivation function* error.
 - 📦 **Version 5** is the current container format written by tool version
-  **1.3.0**: it extends the version 4 field order with the post-quantum fields
+  **1.4.0**: it extends the version 4 field order with the post-quantum fields
   `Mode`, `KEM`, `KEM-Public-Key` and `KEM-Ciphertext`. Older version 1 and 4
   containers are still readable.
 - 📦 The body is the payload, encrypted, followed by a 32-byte tag, base64
@@ -309,7 +312,7 @@ codec, level or input kind invalidates the tag just like changing the salt.
 <a id="post-quantum-container-v5"></a>
 ## 🌌 Post-quantum container (version 5)
 
-Version **5** — written by tool version **1.3.0** — extends the version 4 header
+Version **5** — written by tool version **1.4.0** — extends the version 4 header
 with three post-quantum fields:
 
 ```text
