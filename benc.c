@@ -60,7 +60,7 @@
 /* ------------------------------------------------------------------ */
 
 #define BENC_NAME         "benc"
-#define BENC_VERSION      "1.4.1"
+#define BENC_VERSION      "1.5.0"
 #define BENC_FMT_VERSION  5u          /* what new containers are written as */
 #define BENC_FMT_V4       4u          /* previous container format */
 #define BENC_FMT_LEGACY   1u          /* oldest container still readable    */
@@ -131,6 +131,8 @@ enum {
  * status even when a failure is raised inside a helper that only returns
  * through `fail(); goto done;`. */
 static int g_exit;
+static uint8_t g_kem_ss[BENC_KEM_SHARED_SECRET_LEN];
+static size_t g_kem_ss_len = 0;
 
 /* Compression identifiers.  The order is part of the container: only the
  * name is written, but these values are used everywhere internally. */
@@ -2293,6 +2295,7 @@ typedef struct {
     int kem_mode;                /* 0=password, 1=pq-only, 2=hybrid */
     const char *kem_pub_key;    /* path to KEM public key file (encrypt) */
     const char *kem_secret_key; /* path to KEM secret key file (decrypt) */
+    int keygen;                 /* --keygen flag */
     const char *keygen_output;  /* output path for --keygen */
 } opts;
 
@@ -2935,7 +2938,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     char dirbuf[1024], namebuf[512];
     benc_header h;
     uint8_t enc_key[BENC_KEY_LEN], mac_key[BENC_KEY_LEN], tag[BENC_TAG_LEN];
-    char pw[BENC_MAX_PASSWORD + 1], canon[2048];
+    char pw[BENC_MAX_PASSWORD + 1], canon[8192];
     uint8_t *buf = NULL;
     hmac_ctx mac;
     chacha20_ctx cc;
@@ -2967,7 +2970,16 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
          level > comp_specs[comp].max_level))
         return failc(RC_USAGE, "%s compression levels are %d..%d", comp_specs[comp].name,
                     comp_specs[comp].min_level, comp_specs[comp].max_level);
-    {
+    if (o->kem_pub_key && !o->kem_mode) {
+        /* pq-only mode: no password required */
+        pw[0] = '\0';
+        inter = 0;
+    } else if (o->kem_pub_key) {
+        /* hybrid mode: password + KEM */
+        int pr = get_password(o, pw, sizeof pw, 1, "", &inter);
+        if (pr)
+            return g_exit ? g_exit : pr;
+    } else {
         int pr = get_password(o, pw, sizeof pw, 1, "", &inter);
         if (pr)
             return g_exit ? g_exit : pr;
@@ -3005,6 +3017,38 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     }
     h.size_known = (stream_size(in, &h.size) == 0);
 
+    h.mode = o->kem_pub_key ? (o->kem_mode ? o->kem_mode : 1) : 0;
+    if (o->kem_pub_key) {
+        FILE *kf = fopen(o->kem_pub_key, "rb");
+        uint8_t pk[BENC_KEM_PUBLIC_KEY_LEN];
+        size_t pklen = 0, nread;
+        benc_kem *kem = benc_kem_new("ml-kem-768");
+        uint8_t ct[BENC_KEM_CIPHERTEXT_LEN], ss[BENC_KEM_SHARED_SECRET_LEN];
+        size_t ctlen, sslen;
+        if (!kf || !kem) {
+            if (kf) fclose(kf);
+            if (kem) benc_kem_free(kem);
+            return failc(RC_INPUT, "cannot open KEM public key");
+        }
+        nread = fread(pk, 1, sizeof pk, kf);
+        fclose(kf);
+        pklen = nread;
+        h.kem_alg = 1;
+        memcpy(h.kem_pub_key, pk, pklen);
+        h.kem_pub_key_len = pklen;
+        if (benc_kem_encapsulate(kem, ct, &ctlen, ss, &sslen, pk, pklen)) {
+            benc_kem_free(kem);
+            return failc(RC_ERR, "KEM encapsulation failed");
+        }
+        memcpy(h.kem_ct, ct, ctlen);
+        h.kem_ct_len = ctlen;
+        /* store ss temporarily in a static-ish way: derive later. We'll pass ss via a global. */
+        /* Use a file-scope buffer */
+        memcpy(g_kem_ss, ss, sslen);
+        g_kem_ss_len = sslen;
+        benc_kem_free(kem);
+    }
+
     if (benc_random(h.salt, sizeof h.salt) || benc_random(h.nonce, sizeof h.nonce)) {
         fail("no source of random bytes available");
         goto done;
@@ -3015,7 +3059,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     }
 
     progress_begin(&pg, "Deriving key", 0, 0);
-    derive_keys(pw, &h, enc_key, mac_key, &pg, NULL, 0);
+    derive_keys(pw, &h, enc_key, mac_key, &pg, o->kem_pub_key ? g_kem_ss : NULL, o->kem_pub_key ? g_kem_ss_len : 0);
     progress_finish(&pg);
     benc_wipe(pw, sizeof pw);
 
@@ -3475,7 +3519,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
     char *tmp = NULL, *mid = NULL, *unz = NULL;
     benc_header h;
     uint8_t enc_key[BENC_KEY_LEN], mac_key[BENC_KEY_LEN];
-    char pw[BENC_MAX_PASSWORD + 1], canon[2048];
+    char pw[BENC_MAX_PASSWORD + 1], canon[8192];
     const char *lead = "";
     chacha20_ctx cc;
     plain_ctx plain;
@@ -3543,6 +3587,49 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         goto done;
     }
 
+    if (o->kem_secret_key) {
+        FILE *kf = fopen(o->kem_secret_key, "rb");
+        uint8_t sk[BENC_KEM_SECRET_KEY_LEN];
+        size_t sklen, nread;
+        benc_kem *kem = benc_kem_new("ml-kem-768");
+        uint8_t ss[BENC_KEM_SHARED_SECRET_LEN];
+        size_t sslen;
+        if (!kf || !kem) {
+            if (kf) fclose(kf);
+            if (kem) benc_kem_free(kem);
+            return failc(RC_INPUT, "cannot open KEM secret key");
+        }
+        nread = fread(sk, 1, sizeof sk, kf);
+        fclose(kf);
+        sklen = nread;
+        if (benc_kem_decapsulate(kem, ss, &sslen, h.kem_ct, h.kem_ct_len, sk, sklen)) {
+            benc_kem_free(kem);
+            return failc(RC_AUTH, "wrong key, or the file has been modified");
+        }
+        memcpy(g_kem_ss, ss, sslen);
+        g_kem_ss_len = sslen;
+        benc_kem_free(kem);
+        if (h.mode == 2) {
+            int pr = get_password(o, pw, sizeof pw, 0, lead, &inter);
+            if (pr) goto done;
+        } else {
+            pw[0] = '\0';
+        }
+        progress_begin(&pg, "Deriving key", 0, 0);
+        derive_keys(pw, &h, enc_key, mac_key, &pg, g_kem_ss, g_kem_ss_len);
+        progress_finish(&pg);
+        /* verify */
+        if (bin)
+            r = verify_bin(in, canon, (size_t)strlen(canon), mac_key, fsize - hdr_end, &cipher_len);
+        else
+            r = verify_pass(in, &h, canon, mac_key, fsize - hdr_end, hdr_end, &cipher_len);
+        if (r != RC_OK) {
+            rc = r;
+            failc(r, "wrong key, or the file has been modified");
+            goto done;
+        }
+        tries = BENC_MAX_TRIES; /* skip loop */
+    } else {
     for (tries = 0; tries < BENC_MAX_TRIES; tries++) {
         if (get_password(o, pw, sizeof pw, 0, lead, &inter))
             goto done;
@@ -3570,8 +3657,11 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         }
         goto done;
     }
+    if (!o->kem_secret_key) {
     if (tries == BENC_MAX_TRIES)
         goto done;
+    }
+    }
 
     /* pass 2: decrypt */
     if (benc_fseek(in, (benc_off_t)hdr_end, SEEK_SET) != 0) {
@@ -4167,8 +4257,7 @@ static int parse_options(int argc, char **argv, int start, opts *o,
         } else if (!strcmp(a, "--hybrid")) {
             o->kem_mode = 2;
         } else if (!strcmp(a, "--keygen")) {
-            NEED_VALUE();
-            o->keygen_output = val;
+            o->keygen = 1;
         } else if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) {
             o->quiet = 1;
         } else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
@@ -4267,6 +4356,29 @@ int main(int argc, char **argv)
     if (rc)
         return g_exit ? g_exit : RC_USAGE;
     ui_init(o.quiet);
+
+    if (o.keygen) {
+        const char *base = o.output ? o.output : "kem";
+        benc_kem *kem = benc_kem_new("ml-kem-768");
+        uint8_t pk[BENC_KEM_PUBLIC_KEY_LEN], sk[BENC_KEM_SECRET_KEY_LEN];
+        size_t pklen, sklen;
+        char path[1024];
+        FILE *f;
+        if (!kem) return failc(RC_UNSUPPORTED, "KEM not available");
+        if (benc_kem_keypair(kem, pk, &pklen, sk, &sklen)) {
+            benc_kem_free(kem);
+            return failc(RC_ERR, "key generation failed");
+        }
+        snprintf(path, sizeof path, "%s.pub", base);
+        f = fopen(path, "wb");
+        if (f) { fwrite(pk,1,pklen,f); fclose(f); }
+        snprintf(path, sizeof path, "%s.priv", base);
+        f = fopen(path, "wb");
+        if (f) { fwrite(sk,1,sklen,f); fclose(f); }
+        benc_kem_free(kem);
+        printf("Generated key pair: %s.pub / %s.priv\n", base, base);
+        return RC_OK;
+    }
 
     if (cmd == C_INFO) {
         if (npos != 1)

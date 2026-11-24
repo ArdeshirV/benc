@@ -2,6 +2,7 @@
 *.d
 benc
 build/
+.freebuff
 
 # Object files
 *.o
