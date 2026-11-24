@@ -4,7 +4,7 @@
 
 # 🔐 benc
 
-**Tiny, dependency-free file & directory encryption — one password, one file, post quantum.**
+**Tiny, dependency-free file & directory encryption — one password, one file.**
 
 <i>Binary-tight by default · ASCII-safe on request · From DOS to macOS</i>
 

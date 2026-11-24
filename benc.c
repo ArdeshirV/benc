@@ -2592,7 +2592,8 @@ static void stage_progress_cb(unsigned long long done, unsigned long long total,
 
     if (pg->total == 0 && total > 0) {
         pg->total = (uint64_t)total;
-        progress_draw(pg);
+        if (ui_live)
+            progress_draw(pg);
         pg->last = benc_now_ms();
     }
     progress_set(pg, (uint64_t)done);
@@ -3712,12 +3713,56 @@ static int cmd_info(const char *path)
     benc_header h;
     uint64_t body = 0;
     char num[24];
+    char canon_bin[2048];
+    int bin = 0;
 
     if (!in)
         return failc_errno(RC_INPUT, "cannot open input", path);
-    if (parse_header(in, &h) || read_body(in, count_push, &body, NULL, 0)) {
-        fclose(in);
-        return RC_ERR;
+    {
+        char head[8];
+        size_t hn = fread(head, 1, sizeof head, in);
+        if (hn >= 4 && memcmp(head, "benc|", 4) == 0) {
+            bin = 1;
+            size_t cn = 0;
+            int ch, got = 0;
+            benc_fseek(in, 0, SEEK_SET);
+            while (!got) {
+                ch = fgetc(in);
+                if (ch == EOF)
+                    break;
+                if (ch == '\n') {
+                    got = 1;
+                    break;
+                }
+                if (cn < sizeof canon_bin - 1)
+                    canon_bin[cn++] = (char)ch;
+            }
+            canon_bin[cn] = '\0';
+            if (parse_canonical(canon_bin, &h)) {
+                fclose(in);
+                return failc(RC_FORMAT, "invalid binary container header");
+            }
+        } else {
+            benc_fseek(in, 0, SEEK_SET);
+            if (parse_header(in, &h)) {
+                fclose(in);
+                return g_exit ? g_exit : RC_FORMAT;
+            }
+        }
+    }
+    if (bin) {
+        /* binary container: body is the rest of the file (payload + tag) */
+        uint64_t fsize = 0;
+        uint64_t hdr_end = (uint64_t)benc_ftell(in);
+        if (stream_size(in, &fsize) == 0 && fsize >= hdr_end)
+            body = fsize - hdr_end;
+        else
+            body = 0;
+    } else {
+        if (read_body(in, count_push, &body, NULL, 0)) {
+            fclose(in);
+            return failc(RC_FORMAT, "not a benc file (missing begin marker)");
+        }
     }
     fclose(in);
 
