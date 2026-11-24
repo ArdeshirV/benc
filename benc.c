@@ -53,6 +53,7 @@
 #include "benc_platform.h"
 #include "benc_codecs.h"
 #include "benc_tar.h"
+#include "benc_kem.h"
 
 /* ------------------------------------------------------------------ */
 /* constants                                                           */
@@ -60,7 +61,8 @@
 
 #define BENC_NAME         "benc"
 #define BENC_VERSION      "1.3.0"
-#define BENC_FMT_VERSION  4u          /* what new containers are written as */
+#define BENC_FMT_VERSION  5u          /* what new containers are written as */
+#define BENC_FMT_V4       4u          /* previous container format */
 #define BENC_FMT_LEGACY   1u          /* oldest container still readable    */
 
 #define BENC_SALT_LEN     16
@@ -842,6 +844,58 @@ static void pbkdf2_sha256(const uint8_t *pw, size_t pwlen,
     benc_wipe(tmp, sizeof tmp);
 }
 
+/* HKDF-SHA256 (RFC 5869).  Extract+Expand in one call:
+ *   prk   = HMAC-SHA256(salt, ikm)
+ *   okm   = HKDF-Expand(prk, info, okm_len)
+ *
+ * Returns 0 on success, -1 if okm_len > 255 * BENC_KEY_LEN.
+ */
+static int hkdf_sha256(const uint8_t *ikm, size_t ikm_len,
+                       const uint8_t *salt, size_t salt_len,
+                       const uint8_t *info, size_t info_len,
+                       uint8_t *okm, size_t okm_len)
+{
+    hmac_ctx base;
+    uint8_t prk[BENC_KEY_LEN];
+    uint8_t t[BENC_KEY_LEN];
+    size_t off = 0;
+    uint8_t counter = 1;
+
+    if (okm_len > 255 * BENC_KEY_LEN)
+        return -1;
+
+    /* Extract: prk = HMAC-SHA256(salt, ikm) */
+    hmac_init(&base, salt, salt_len);
+    hmac_update(&base, ikm, ikm_len);
+    hmac_final(&base, prk);
+
+    /* Expand: OKM = T(1) || T(2) || ... where
+     *   T(i) = HMAC-SHA256(prk, T(i-1) || info || INT(i)) */
+    while (off < okm_len) {
+        hmac_ctx h;
+        size_t take;
+
+        hmac_init(&h, prk, BENC_KEY_LEN);
+        if (off > 0)
+            hmac_update(&h, t, BENC_KEY_LEN);
+        hmac_update(&h, info, info_len);
+        hmac_update(&h, &counter, 1);
+        hmac_final(&h, t);
+
+        take = okm_len - off;
+        if (take > BENC_KEY_LEN)
+            take = BENC_KEY_LEN;
+        memcpy(okm + off, t, take);
+        off += take;
+        counter++;
+    }
+
+    benc_wipe(prk, sizeof prk);
+    benc_wipe(t, sizeof t);
+    benc_wipe(&base, sizeof base);
+    return 0;
+}
+
 static int ct_equal(const uint8_t *a, const uint8_t *b, size_t n)
 {
     uint8_t d = 0;
@@ -1349,11 +1403,21 @@ typedef struct {
     int      level;
     int      threads;
     int      archive;       /* payload is a tar archive of a directory */
+    /* Post-quantum fields (container format v5+) */
+    int      mode;          /* 0=password, 1=pq-only, 2=hybrid */
+    int      kem_alg;       /* 0=none, 1=ml-kem-768 */
+    uint8_t  kem_pub_key[BENC_KEM_PUBLIC_KEY_LEN];
+    size_t   kem_pub_key_len;
+    uint8_t  kem_ct[BENC_KEM_CIPHERTEXT_LEN];
+    size_t   kem_ct_len;
 } benc_header;
 
 typedef struct {
     char salt[32], nonce[16], name[4 * ((BENC_MAX_NAME + 2) / 3) + 8];
     char iters[24], size[24], level[16], threads[16], input[8];
+    char mode[16], kem[32];
+    char kem_pub_key[4 * ((BENC_KEM_PUBLIC_KEY_LEN + 2) / 3) + 8];
+    char kem_ct[4 * ((BENC_KEM_CIPHERTEXT_LEN + 2) / 3) + 8];
 } hdr_text;
 
 static int header_encode(const benc_header *h, hdr_text *t)
@@ -1367,6 +1431,26 @@ static int header_encode(const benc_header *h, hdr_text *t)
     u64_to_dec((uint64_t)(h->level < 0 ? 0 : h->level), t->level);
     u64_to_dec((uint64_t)(h->threads < 0 ? 0 : h->threads), t->threads);
     strcpy(t->input, h->archive ? "tar" : "file");
+    if (h->mode == 0)
+        strcpy(t->mode, "password");
+    else if (h->mode == 1)
+        strcpy(t->mode, "pq");
+    else
+        strcpy(t->mode, "hybrid");
+    if (h->kem_alg == 1)
+        strcpy(t->kem, "ml-kem-768");
+    else
+        strcpy(t->kem, "none");
+    if (h->kem_pub_key_len > 0)
+        b64_encode_string(h->kem_pub_key, h->kem_pub_key_len, t->kem_pub_key,
+                          sizeof t->kem_pub_key);
+    else
+        t->kem_pub_key[0] = '\0';
+    if (h->kem_ct_len > 0)
+        b64_encode_string(h->kem_ct, h->kem_ct_len, t->kem_ct,
+                          sizeof t->kem_ct);
+    else
+        t->kem_ct[0] = '\0';
     if (h->size_known)
         u64_to_dec(h->size, t->size);
     else
@@ -1386,12 +1470,19 @@ static int header_canonical(const benc_header *h, char *out, size_t cap)
         r = snprintf(out, cap, "benc|%u|%s|%s|%s|%s|%s|%s\n",
                      BENC_FMT_LEGACY, BENC_KDF_NAME, t.iters, t.salt, t.nonce,
                      t.name, t.size);
-    else
+    else if (h->version == BENC_FMT_V4)
         r = snprintf(out, cap,
                      "benc|%u|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n",
                      h->version, BENC_KDF_NAME, t.iters, BENC_CIPHER_NAME,
                      BENC_MAC_NAME, comp_specs[h->comp].name, t.level,
                      t.threads, t.input, t.salt, t.nonce, t.name, t.size);
+    else
+        r = snprintf(out, cap,
+                     "benc|%u|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n",
+                     h->version, BENC_KDF_NAME, t.iters, BENC_CIPHER_NAME,
+                     BENC_MAC_NAME, comp_specs[h->comp].name, t.level,
+                     t.threads, t.input, t.salt, t.nonce, t.name, t.size,
+                     t.mode, t.kem, t.kem_pub_key, t.kem_ct);
     return (r < 0 || (size_t)r >= cap) ? -1 : 0;
 }
 
@@ -1408,7 +1499,8 @@ static int write_header(FILE *fp, const benc_header *h)
                        BENC_BEGIN_FILE, BENC_FMT_LEGACY, BENC_KDF_NAME, t.iters,
                        BENC_CIPHER_NAME, BENC_MAC_NAME, t.salt, t.nonce, t.name,
                        t.size, BENC_BEGIN_DATA) < 0 ? -1 : 0;
-    return fprintf(fp,
+    if (h->version == BENC_FMT_V4)
+        return fprintf(fp,
                    "%s\nVersion: %u\nKDF: %s\nIterations: %s\nCipher: %s\n"
                    "MAC: %s\nCompression: %s\nCompression-Level: %s\n"
                    "Compression-Threads: %s\nInput: %s\nSalt: %s\nNonce: %s\n"
@@ -1417,6 +1509,18 @@ static int write_header(FILE *fp, const benc_header *h)
                    BENC_CIPHER_NAME, BENC_MAC_NAME, comp_specs[h->comp].name,
                    t.level, t.threads, t.input, t.salt, t.nonce, t.name,
                    t.size, BENC_BEGIN_DATA) < 0 ? -1 : 0;
+    return fprintf(fp,
+                   "%s\nVersion: %u\nKDF: %s\nIterations: %s\nCipher: %s\n"
+                   "MAC: %s\nCompression: %s\nCompression-Level: %s\n"
+                   "Compression-Threads: %s\nInput: %s\nMode: %s\nKEM: %s\n"
+                   "KEM-Public-Key: %s\nKEM-Ciphertext: %s\n"
+                   "Salt: %s\nNonce: %s\nName: %s\nSize: %s\n%s\n",
+                   BENC_BEGIN_FILE, h->version, BENC_KDF_NAME, t.iters,
+                   BENC_CIPHER_NAME, BENC_MAC_NAME, comp_specs[h->comp].name,
+                   t.level, t.threads, t.input, t.mode, t.kem,
+                   t.kem_pub_key, t.kem_ct,
+                   t.salt, t.nonce, t.name, t.size,
+                   BENC_BEGIN_DATA) < 0 ? -1 : 0;
 }
 
 /* Base64 is case sensitive and its last character may carry unused bits.
@@ -1454,22 +1558,33 @@ static int read_line(FILE *fp, char *buf, size_t cap)
     return 1;
 }
 
-enum {
-    SEEN_VERSION = 1u << 0, SEEN_KDF = 1u << 1, SEEN_ITER = 1u << 2,
-    SEEN_CIPHER = 1u << 3, SEEN_MAC = 1u << 4, SEEN_SALT = 1u << 5,
-    SEEN_NONCE = 1u << 6, SEEN_NAME = 1u << 7, SEEN_SIZE = 1u << 8,
-    SEEN_COMP = 1u << 9, SEEN_LEVEL = 1u << 10, SEEN_THREADS = 1u << 11,
-    SEEN_INPUT = 1u << 12,
-    SEEN_REQUIRED = SEEN_VERSION | SEEN_KDF | SEEN_ITER | SEEN_CIPHER |
-                    SEEN_MAC | SEEN_SALT | SEEN_NONCE,
-    SEEN_V4_REQUIRED = SEEN_COMP | SEEN_LEVEL | SEEN_THREADS | SEEN_INPUT
-};
+#define SEEN_VERSION    (1UL << 0)
+#define SEEN_KDF        (1UL << 1)
+#define SEEN_ITER       (1UL << 2)
+#define SEEN_CIPHER     (1UL << 3)
+#define SEEN_MAC        (1UL << 4)
+#define SEEN_SALT       (1UL << 5)
+#define SEEN_NONCE      (1UL << 6)
+#define SEEN_NAME       (1UL << 7)
+#define SEEN_SIZE       (1UL << 8)
+#define SEEN_COMP       (1UL << 9)
+#define SEEN_LEVEL      (1UL << 10)
+#define SEEN_THREADS    (1UL << 11)
+#define SEEN_INPUT      (1UL << 12)
+#define SEEN_MODE       (1UL << 13)
+#define SEEN_KEM         (1UL << 14)
+#define SEEN_KEM_PUB_KEY (1UL << 15)
+#define SEEN_KEM_CT      (1UL << 16)
+#define SEEN_REQUIRED    (SEEN_VERSION | SEEN_KDF | SEEN_ITER | SEEN_CIPHER | \
+                          SEEN_MAC | SEEN_SALT | SEEN_NONCE)
+#define SEEN_V4_REQUIRED (SEEN_COMP | SEEN_LEVEL | SEEN_THREADS | SEEN_INPUT)
+#define SEEN_V5_REQUIRED (SEEN_REQUIRED | SEEN_MODE)
 
 /* on success the stream is positioned at the first line of the body */
 static int parse_header(FILE *fp, benc_header *h)
 {
     char line[8192];
-    unsigned seen = 0;
+    unsigned long seen = 0;
     uint64_t v;
     int r;
 
@@ -1480,7 +1595,7 @@ static int parse_header(FILE *fp, benc_header *h)
 
     for (;;) {
         char *colon, *key, *val;
-        unsigned bit;
+        unsigned long bit;
 
         r = read_line(fp, line, sizeof line);
         if (r == 0)
@@ -1509,6 +1624,10 @@ static int parse_header(FILE *fp, benc_header *h)
         else if (strcmp(key, "Compression-Level") == 0)   bit = SEEN_LEVEL;
         else if (strcmp(key, "Compression-Threads") == 0) bit = SEEN_THREADS;
         else if (strcmp(key, "Input") == 0)               bit = SEEN_INPUT;
+        else if (strcmp(key, "Mode") == 0)                bit = SEEN_MODE;
+        else if (strcmp(key, "KEM") == 0)                 bit = SEEN_KEM;
+        else if (strcmp(key, "KEM-Public-Key") == 0)      bit = SEEN_KEM_PUB_KEY;
+        else if (strcmp(key, "KEM-Ciphertext") == 0)      bit = SEEN_KEM_CT;
         else return failc(RC_FORMAT, "unknown header field");
         if (seen & bit)
             return failc(RC_FORMAT, "duplicate header field");
@@ -1594,13 +1713,51 @@ static int parse_header(FILE *fp, benc_header *h)
                 h->size_known = 1;
             }
             break;
+        case SEEN_MODE:
+            if (strcmp(val, "password") == 0)
+                h->mode = 0;
+            else if (strcmp(val, "pq") == 0)
+                h->mode = 1;
+            else if (strcmp(val, "hybrid") == 0)
+                h->mode = 2;
+            else
+                return failc(RC_UNSUPPORTED, "unknown output mode '%s'", val);
+            break;
+        case SEEN_KEM:
+            if (strcmp(val, "none") == 0)
+                h->kem_alg = 0;
+            else if (strcmp(val, "ml-kem-768") == 0)
+                h->kem_alg = 1;
+            else
+                return failc(RC_UNSUPPORTED, "unsupported KEM '%s'", val);
+            break;
+        case SEEN_KEM_PUB_KEY: {
+            size_t n;
+            if (b64_decode(val, h->kem_pub_key, sizeof h->kem_pub_key, &n) ||
+                n > BENC_KEM_PUBLIC_KEY_LEN)
+                return failc(RC_FORMAT, "invalid KEM public key");
+            h->kem_pub_key_len = n;
+            break;
+        }
+        case SEEN_KEM_CT: {
+            size_t n;
+            if (b64_decode(val, h->kem_ct, sizeof h->kem_ct, &n) ||
+                n > BENC_KEM_CIPHERTEXT_LEN)
+                return failc(RC_FORMAT, "invalid KEM ciphertext");
+            h->kem_ct_len = n;
+            break;
+        }
         }
     }
     if ((seen & SEEN_REQUIRED) != SEEN_REQUIRED)
         return failc(RC_FORMAT, "incomplete header");
-    if (h->version > BENC_FMT_LEGACY &&
-        (seen & SEEN_V4_REQUIRED) != SEEN_V4_REQUIRED)
-        return failc(RC_FORMAT, "incomplete header");
+    if (h->version > BENC_FMT_LEGACY) {
+        unsigned long required = SEEN_V4_REQUIRED;
+        if (h->version >= BENC_FMT_VERSION)
+            required |= SEEN_V5_REQUIRED;
+        if ((seen & required) != required)
+            return failc(RC_FORMAT, "incomplete header");
+    }
     if (h->version <= BENC_FMT_LEGACY) {
         h->comp = COMP_NONE;
         h->level = 0;
@@ -2132,6 +2289,11 @@ typedef struct {
     int compress;                /* COMP_* */
     int level;                   /* -1 = the codec default */
     long threads;                /* 0 = all cores / backend default */
+    /* Post-quantum */
+    int kem_mode;                /* 0=password, 1=pq-only, 2=hybrid */
+    const char *kem_pub_key;    /* path to KEM public key file (encrypt) */
+    const char *kem_secret_key; /* path to KEM secret key file (decrypt) */
+    const char *keygen_output;  /* output path for --keygen */
 } opts;
 
 /* read one key press without echo; -1 on EOF */
@@ -2588,12 +2750,32 @@ static int copy_tree(const char *src, const char *dst)
 
 static void derive_keys(const char *pw, const benc_header *h,
                         uint8_t enc_key[BENC_KEY_LEN],
-                        uint8_t mac_key[BENC_KEY_LEN], progress *pg)
+                        uint8_t mac_key[BENC_KEY_LEN], progress *pg,
+                        const uint8_t *ss, size_t ss_len)
 {
     uint8_t master[64];
 
     pbkdf2_sha256((const uint8_t *)pw, strlen(pw), h->salt, BENC_SALT_LEN,
                   h->iterations, master, sizeof master, pg);
+
+    if (h->mode > 0 && ss && ss_len > 0) {
+        uint8_t prk[BENC_KEY_LEN];
+        uint8_t final_key[64];
+        static const uint8_t hkdf_info[] = "benc v1.3 hybrid key v1";
+
+        if (hkdf_sha256(ss, ss_len, master, sizeof master, hkdf_info,
+                       sizeof hkdf_info - 1, prk, BENC_KEY_LEN) == 0 &&
+            hkdf_sha256(prk, BENC_KEY_LEN, NULL, 0, hkdf_info,
+                        sizeof hkdf_info - 1, final_key, sizeof final_key) == 0) {
+            memcpy(enc_key, final_key, BENC_KEY_LEN);
+            memcpy(mac_key, final_key + BENC_KEY_LEN, BENC_KEY_LEN);
+            benc_wipe(prk, sizeof prk);
+            benc_wipe(final_key, sizeof final_key);
+            benc_wipe(master, sizeof master);
+            return;
+        }
+    }
+
     memcpy(enc_key, master, BENC_KEY_LEN);
     memcpy(mac_key, master + BENC_KEY_LEN, BENC_KEY_LEN);
     benc_wipe(master, sizeof master);
@@ -2821,7 +3003,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     }
 
     progress_begin(&pg, "Deriving key", 0, 0);
-    derive_keys(pw, &h, enc_key, mac_key, &pg);
+    derive_keys(pw, &h, enc_key, mac_key, &pg, NULL, 0);
     progress_finish(&pg);
     benc_wipe(pw, sizeof pw);
 
@@ -3100,7 +3282,7 @@ static int parse_canonical(const char *s, benc_header *h)
     size_t flen[16];
     int ntok = 0;
     char *p;
-    unsigned seen = 0;
+    unsigned long seen = 0;
     uint64_t v;
     int rc;
 
@@ -3353,7 +3535,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         if (get_password(o, pw, sizeof pw, 0, lead, &inter))
             goto done;
         progress_begin(&pg, "Deriving key", 0, 0);
-        derive_keys(pw, &h, enc_key, mac_key, &pg);
+        derive_keys(pw, &h, enc_key, mac_key, &pg, NULL, 0);
         progress_finish(&pg);
         benc_wipe(pw, sizeof pw);
 
@@ -3920,6 +4102,17 @@ static int parse_options(int argc, char **argv, int start, opts *o,
             o->use_header_name = 1;
         } else if (!strcmp(a, "--no-name")) {
             o->no_name = 1;
+        } else if (!strcmp(a, "-k") || !strcmp(a, "--kem")) {
+            NEED_VALUE();
+            o->kem_pub_key = val;
+        } else if (!strcmp(a, "--key")) {
+            NEED_VALUE();
+            o->kem_secret_key = val;
+        } else if (!strcmp(a, "--hybrid")) {
+            o->kem_mode = 2;
+        } else if (!strcmp(a, "--keygen")) {
+            NEED_VALUE();
+            o->keygen_output = val;
         } else if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) {
             o->quiet = 1;
         } else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {

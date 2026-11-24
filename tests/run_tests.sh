@@ -246,7 +246,7 @@ rc=$?
 if [ "$rc" -ne 0 ]; then ok "--legacy is rejected"; else bad "--legacy is rejected"; fi
 expect_file_missing "--legacy does not write a container" "$WORK/v1.benc"
 
-sed 's/^Version: 4$/Version: 1/' "$WORK/text.txt.bct" > "$WORK/downgrade.benc"
+sed 's/^Version: 5$/Version: 1/' "$WORK/text.txt.bct" > "$WORK/downgrade.benc"
 "$BENC" decrypt -q -f -p "$PW" "$WORK/downgrade.benc" -o "$WORK/dg.out" >/dev/null 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "version downgrade is rejected"; else bad "version downgrade is rejected"; fi
