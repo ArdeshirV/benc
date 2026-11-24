@@ -98,6 +98,28 @@ Password:
 Extracted photos.bcb -> photos  (159 B, 0.2 s)
 ```
 
+**Everything benc can do:**
+
+```console
+benc -c zstd -l 19 -T 8 notes.pdf         # compress with zstd level 19 on 8 threads
+benc --no-compress -p secret notes.pdf   # store without compression
+benc -i 1000 backup.tar                   # PBKDF2 iterations for new containers
+benc -b notes.pdf                         # force binary container
+benc -t notes.pdf                         # force ASCII text container
+benc -n notes.pdf.bcb                    # restore the stored file name on decrypt
+```
+
+**Post-quantum (container format version 5, tool version 1.4.0):**
+
+```console
+$ benc --keygen --kem ml-kem-768 --output kem    # generate an ML-KEM-768 key pair
+$ benc --kem kem.pub notes.pdf                 # encrypt to a post-quantum recipient
+$ benc --key kem.priv notes.pdf.bcb          # decrypt with the recipient private key
+
+$ benc --hybrid --kem kem.pub notes.pdf      # hybrid: password master + KEM shared secret
+$ benc --key kem.priv notes.pdf.bcb --hybrid # hybrid: decrypt with password + private key
+```
+
 > ℹ️ Sizes and timings vary with the input and machine. The default output is
 > the binary `.bcb` container; `--textout` selects the ASCII `.bct` container.
 > The interaction line is the only terminal output: the single status line is
