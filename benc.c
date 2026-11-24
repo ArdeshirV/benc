@@ -2592,7 +2592,8 @@ static void stage_progress_cb(unsigned long long done, unsigned long long total,
 
     if (pg->total == 0 && total > 0) {
         pg->total = (uint64_t)total;
-        progress_draw(pg);
+        if (ui_live)
+            progress_draw(pg);
         pg->last = benc_now_ms();
     }
     progress_set(pg, (uint64_t)done);
