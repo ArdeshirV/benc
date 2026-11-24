@@ -337,6 +337,50 @@ else
     ok "kem: skipped (liboqs not built into benc)"
 fi
 
+echo "== container format version 5 (new specifications after 1.2.0) =="
+if "$BENC" info "$WORK/text.txt.bct" | grep -q 'Format version:'; then
+    ok "v5 container info reports the format version"
+else
+    bad "v5 container info reports the format version"
+fi
+if grep -q '^Version: 5$' "$WORK/text.txt.bct"; then
+    ok "new containers use version 5"
+else
+    bad "new containers use version 5"
+fi
+if grep -q '^Mode: password$' "$WORK/text.txt.bct"; then
+    ok "v5 records the password mode"
+else
+    bad "v5 records the password mode"
+fi
+if grep -q '^KEM: none$' "$WORK/text.txt.bct"; then
+    ok "v5 records no KEM for password containers"
+else
+    bad "v5 records no KEM for password containers"
+fi
+
+sed '/^Mode: password$/d' "$WORK/text.txt.bct" > "$WORK/v5-nomode.benc"
+"$BENC" decrypt -q -f -p "$PW" "$WORK/v5-nomode.benc" -o "$WORK/v5-nomode.out" >/dev/null 2>&1
+expect_rc "v5 without Mode is rejected" 6 $?
+expect_file_missing "no plaintext for v5 without Mode" "$WORK/v5-nomode.out"
+
+sed 's/^Version: 5$/Version: 4/' "$WORK/text.txt.bct" > "$WORK/v5-v4.benc"
+"$BENC" decrypt -q -f -p "$PW" "$WORK/v5-v4.benc" -o "$WORK/v5-v4.out" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then ok "version downgrade from v5 to v4 is rejected"; else bad "version downgrade from v5 to v4 is rejected"; fi
+expect_file_missing "no plaintext for downgraded v5 container" "$WORK/v5-v4.out"
+
+sed 's/^Mode: password$/Mode: pq/' "$WORK/text.txt.bct" > "$WORK/v5-modepq.benc"
+"$BENC" decrypt -q -f -p "$PW" "$WORK/v5-modepq.benc" -o "$WORK/v5-modepq.out" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then ok "modified Mode field is rejected"; else bad "modified Mode field is rejected"; fi
+expect_file_missing "no plaintext for modified Mode container" "$WORK/v5-modepq.out"
+
+echo "== v5 round trips with other data and parameters =="
+"$BENC" encrypt -q -f --textout -p 'another password' "$WORK/crlf.txt" -o "$WORK/crlf2.bct" >/dev/null 2>&1
+"$BENC" decrypt -q -f -p 'another password' "$WORK/crlf2.bct" -o "$WORK/crlf2.out" >/dev/null 2>&1
+expect_same "v5 round trip with different password" "$WORK/crlf.txt" "$WORK/crlf2.out"
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "all $PASSED tests passed"

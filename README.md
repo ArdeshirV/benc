@@ -30,6 +30,7 @@
 - [🗜️ Compression & directories](#compression-directories)
 - [💾 16-bit DOS](#16-bit-dos)
 - [📜 Container format](#container-format)
+- [🌌 Post-quantum container (version 5)](#post-quantum-container-v5)
 - [🛡️ Security notes](#security-notes)
 - [🚦 Exit codes](#exit-codes)
 - [🏗️ Build](#build)
@@ -147,6 +148,10 @@ or decrypts accordingly.
 | `-q, --quiet` | suppress progress and result messages |
 | `-h, --help` | show the help text |
 | `-v, --version` | show the version |
+| `-k, --kem FILE` | post-quantum public key file (encrypt, ML-KEM-768) |
+| `--key FILE` | post-quantum private key file (decrypt) |
+| `--hybrid` | derive the file key via HKDF from password master + KEM shared secret |
+| `--keygen FILE` | generate a new ML-KEM-768 public/private key pair |
 
 ---
 
@@ -228,7 +233,7 @@ instead of failing**:
 
 ```text
 -----BEGIN BENC FILE-----
-Version: 4
+Version: 5
 KDF: PBKDF2-HMAC-SHA256
 Iterations: 210000
 Cipher: ChaCha20
@@ -237,6 +242,10 @@ Compression: lzma2
 Compression-Level: 6
 Compression-Threads: 0
 Input: file
+Mode: password
+KEM: none
+KEM-Public-Key: <base64 or empty>
+KEM-Ciphertext: <base64 or empty>
 Salt: <base64>
 Nonce: <base64>
 Name: <base64>
@@ -255,11 +264,15 @@ Size: <bytes or ->
   `Compression-Threads` the requested worker count (`0` = all cores).
   `Input` is `tar` for a packed directory, otherwise `file`.
 - 🕰️ **Version 1** containers (no compression fields) are still read and decrypted.
+- 🧾 **Version 4** containers (the previous format) are still read and decrypted.
 - 🚫 **Versions 2 and 3** are not produced by this tool: they belong to a
   different container lineage (PBKDF2-HMAC-SHA256+SHAKE256, ChaCha20-Cascade-512,
   KMAC256) and are rejected by `parse_header` with an *unsupported key
-  derivation function* error. New containers are written as **version 4** to
-  avoid colliding with the 2/3 fixtures in `tests/data/`.
+  derivation function* error.
+- 📦 **Version 5** is the current container format written by tool version
+  **1.3.0**: it extends the version 4 field order with the post-quantum fields
+  `Mode`, `KEM`, `KEM-Public-Key` and `KEM-Ciphertext`. Older version 1 and 4
+  containers are still readable.
 - 📦 The body is the payload, encrypted, followed by a 32-byte tag, base64
   encoded in 64-character lines.
 
@@ -274,12 +287,52 @@ base64 body). The binary form starts with the canonical header magic
 **Key schedule**
 
 ```text
-key = PBKDF2-HMAC-SHA256(password, salt, iterations, 32)
-tag = HMAC-SHA256(key, canonical_header || ciphertext)
+key = PBKDF2-HMAC-SHA256(password, salt, iterations, 64)   # enc key = first 32, mac key = second 32
+tag = HMAC-SHA256(mac_key, canonical_header || ciphertext)
+```
+
+For post-quantum containers (`Mode: pq` or `Mode: hybrid`) the file key is
+derived through HKDF-SHA256 on top of the PBKDF2 master secret and the KEM shared
+secret:
+
+```text
+prk = HKDF-Extract(salt = <pbkdf2 master secret>, ikm = <kem shared secret>)
+key = HKDF-Expand(prk, info = "benc v1.3 hybrid key v1", length = 64)
+     # -> enc_key[32] || mac_key[32]
 ```
 
 The compression fields sit in the canonical header, so changing the recorded
 codec, level or input kind invalidates the tag just like changing the salt.
+
+---
+
+<a id="post-quantum-container-v5"></a>
+## 🌌 Post-quantum container (version 5)
+
+Version **5** — written by tool version **1.3.0** — extends the version 4 header
+with three post-quantum fields:
+
+```text
+Mode: password        # password based (default), pq-only, hybrid
+KEM: none             # no KEM, or ml-kem-768
+KEM-Public-Key: <base64>    # KEM public key, base64 encoded
+KEM-Ciphertext: <base64>   # KEM encapsulated ciphertext, base64 encoded
+```
+
+- 🔐 `Mode: password` is the default and keeps the version 4 key schedule
+  (PBKDF2-HMAC-SHA256 master split into cipher key and MAC key).
+- 🔒 `Mode: pq` selects post-quantum key encapsulation for the payload key.
+- 🔗 `Mode: hybrid` mixes the password master secret and the KEM shared secret
+  with HKDF-SHA256 to derive the file key (see *Key schedule* above).
+
+The KEM public key and ciphertext are base64 in the header and are covered by
+the HMAC tag like every other authenticated header field. The matching command
+line options are `--kem`, `--key`, `--hybrid` and `--keygen`.
+
+> ℹ️ The ML-KEM-768 backend wraps the
+> [liboqs](https://github.com/open-quantum-safe/liboqs) library and is compiled
+> only when the Makefile defines `BENC_WITH_MLKEM`; without it the tool stays in
+> password-only mode and the post-quantum options are not offered.
 
 ---
 

@@ -10,7 +10,7 @@
  * (Linux, macOS, Termux, *BSD), MinGW or MSVC (Windows) and DJGPP /
  * ia16-gcc (DOS; use -mcmodel=medium, the tiny model is too small).
  *
- * Construction (container format 4; format 1 files still decrypt).  Versions
+ * Construction (container format 5; formats 1 and 4 files still decrypt).  Versions
  * 2 and 3 belong to a different container lineage (SHAKE256 KDF,
  * ChaCha20-Cascade-512, KMAC256, encrypted names) and are rejected.
  *   preprocess: a directory is packed with tar, then the payload is
