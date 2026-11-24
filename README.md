@@ -19,6 +19,10 @@
 
 </div>
 
+## 🔐 Technical Summary
+
+> **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum ML-KEM-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, FreeBSD, and DOS** with no runtime dependencies (liboqs stays strictly optional).
+
 ---
 
 ## 📖 Table of contents
