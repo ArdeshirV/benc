@@ -313,6 +313,30 @@ printf 'not a benc file\n' > "$WORK/foreign.dat"
 "$BENC" decrypt -p "$PW" "$WORK/foreign.dat" >/dev/null 2>&1
 expect_rc "foreign container exits 6" 6 $?
 
+echo "== ML-KEM-768 key encapsulation (post-quantum) =="
+if "$BENC" --keygen --help >/dev/null 2>&1; then
+    KEMAVAIL=1
+else
+    KEMAVAIL=0
+fi
+if [ "$KEMAVAIL" = 1 ]; then
+    rm -f "$WORK/kem.priv" "$WORK/kem.pub" "$WORK/kem.bcb" "$WORK/kem.out" "$WORK/kem.bad.out"
+    "$BENC" --keygen --kem ml-kem-768 --output "$WORK/kem" >/dev/null 2>&1
+    expect_rc "kem keygen succeeds" 0 $?
+    [ -f "$WORK/kem.priv" ] && ok "kem private key written" || bad "kem private key missing"
+    [ -f "$WORK/kem.pub" ]  && ok "kem public key written"  || bad "kem public key missing"
+    "$BENC" encrypt --kem "$WORK/kem.pub" -f "$WORK/text.txt" -o "$WORK/kem.bcb" >/dev/null 2>&1
+    expect_rc "kem encrypt succeeds" 0 $?
+    "$BENC" decrypt --key "$WORK/kem.priv" -f "$WORK/kem.bcb" -o "$WORK/kem.out" >/dev/null 2>&1
+    expect_rc "kem decrypt succeeds" 0 $?
+    cmp -s "$WORK/text.txt" "$WORK/kem.out" && ok "kem decrypt recovers plaintext" || bad "kem decrypt differs"
+    printf 'not a private key\n' > "$WORK/bad.priv"
+    "$BENC" decrypt --key "$WORK/bad.priv" -f "$WORK/kem.bcb" -o "$WORK/kem.bad.out" >/dev/null 2>&1
+    [ $? -ne 0 ] && ok "kem wrong private key rejected" || bad "kem wrong private key accepted"
+else
+    ok "kem: skipped (liboqs not built into benc)"
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "all $PASSED tests passed"

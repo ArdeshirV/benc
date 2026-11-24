@@ -59,6 +59,15 @@ LDLIBS   ?=
 PREFIX   ?= /usr/local
 STATIC   ?= 0
 
+# ML-KEM-768 (post-quantum key encapsulation), optional via liboqs.
+# liboqs (MIT licensed, FIPS 203 reference implementation) is used only when
+# installed on the build machine.  When it is absent, BENC_WITH_MLKEM is empty
+# and benc builds password-only on every platform (DOS and cross-compiles
+# never link liboqs, so they always build password-only).
+BENC_WITH_MLKEM ?= $(shell pkg-config --exists liboqs 2>/dev/null && echo 1)
+BENC_EXTRA_SRC   = $(if $(BENC_WITH_MLKEM),benc_kem.c,)
+BENC_EXTRA_LIBS  = $(if $(BENC_WITH_MLKEM),-loqs,)
+
 ifeq ($(DEBUG),1)
   CFLAGS := -O0 -g3
 endif
@@ -190,7 +199,7 @@ native-optimized: CFLAGS += -march=native
 native-optimized: $(APP)$(EXE)
 
 $(APP)$(EXE): $(SRC) $(HDRS)
-	$(CC) $(CFLAGS) $(WARN) -DBENC_POSIX -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -DBENC_POSIX -o $@ $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS) $(BENC_EXTRA_LIBS)
 
 # --------------------------------------------------------------- linux ----
 linux:
