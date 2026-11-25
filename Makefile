@@ -202,10 +202,10 @@ $(APP)$(EXE): $(SRC) $(HDRS)
 linux:
 ifneq (,$(filter linux termux,$(HOST)))
 	@mkdir -p $(BUILD)/linux
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(LINUX_CC),)
 	@mkdir -p $(BUILD)/linux
-	$(LINUX_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(LINUX_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "linux: run this on Linux, or set LINUX_CC to a Linux cross compiler" >&2
 	@exit 1
@@ -215,14 +215,14 @@ endif
 linux-386:
 ifneq (,$(filter i386 i686,$(HOST_ARCH)))
 	@mkdir -p $(BUILD)/linux-386
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-386/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-386/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(LINUX_386_CC),)
 	@command -v $(LINUX_386_CC) >/dev/null 2>&1 || { \
 	  echo "linux-386: $(LINUX_386_CC) not found." >&2; \
 	  echo "  Debian/Ubuntu: sudo apt install gcc-multilib" >&2; \
 	  echo "  or set LINUX_386_CC=/path/to/i686-linux-gnu-gcc" >&2; exit 1; }
 	@mkdir -p $(BUILD)/linux-386
-	$(LINUX_386_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-386/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(LINUX_386_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-386/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "linux-386: run this on i386/i686 Linux, or set LINUX_386_CC" >&2
 	@exit 1
@@ -232,14 +232,14 @@ endif
 linux-amd64:
 ifneq (,$(filter x86_64 amd64,$(HOST_ARCH)))
 	@mkdir -p $(BUILD)/linux-amd64
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-amd64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(LINUX_AMD64_CC),)
 	@command -v $(LINUX_AMD64_CC) >/dev/null 2>&1 || { \
 	  echo "linux-amd64: $(LINUX_AMD64_CC) not found." >&2; \
 	  echo "  Debian/Ubuntu: sudo apt install gcc-x86-64-linux-gnu-gcc" >&2; \
 	  echo "  or set LINUX_AMD64_CC=/path/to/x86_64-linux-gnu-gcc" >&2; exit 1; }
 	@mkdir -p $(BUILD)/linux-amd64
-	$(LINUX_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(LINUX_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-amd64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "linux-amd64: run this on x86_64 Linux, or set LINUX_AMD64_CC" >&2
 	@exit 1
@@ -249,14 +249,14 @@ endif
 linux-arm:
 ifneq (,$(filter arm armv% armhf,$(HOST_ARCH)))
 	@mkdir -p $(BUILD)/linux-arm
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(LINUX_ARM_CC),)
 	@command -v $(LINUX_ARM_CC) >/dev/null 2>&1 || { \
 	  echo "linux-arm: $(LINUX_ARM_CC) not found." >&2; \
 	  echo "  Debian/Ubuntu: sudo apt install gcc-arm-linux-gnueabihf" >&2; \
 	  echo "  or set LINUX_ARM_CC=/path/to/arm-linux-gnueabihf-gcc" >&2; exit 1; }
 	@mkdir -p $(BUILD)/linux-arm
-	$(LINUX_ARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(LINUX_ARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "linux-arm: run this on arm Linux, or set LINUX_ARM_CC" >&2
 	@exit 1
@@ -266,14 +266,14 @@ endif
 linux-arm64:
 ifneq (,$(filter aarch64 arm64,$(HOST_ARCH)))
 	@mkdir -p $(BUILD)/linux-arm64
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(LINUX_ARM64_CC),)
 	@command -v $(LINUX_ARM64_CC) >/dev/null 2>&1 || { \
 	  echo "linux-arm64: $(LINUX_ARM64_CC) not found." >&2; \
 	  echo "  Debian/Ubuntu: sudo apt install gcc-aarch64-linux-gnu" >&2; \
 	  echo "  or set LINUX_ARM64_CC=/path/to/aarch64-linux-gnu-gcc" >&2; exit 1; }
 	@mkdir -p $(BUILD)/linux-arm64
-	$(LINUX_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(LINUX_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/linux-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "linux-arm64: run this on aarch64 Linux, or set LINUX_ARM64_CC" >&2
 	@exit 1
@@ -283,10 +283,10 @@ endif
 macos:
 ifeq ($(HOST),macos)
 	@mkdir -p $(BUILD)/macos
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(MACOS_CC),)
 	@mkdir -p $(BUILD)/macos
-	$(MACOS_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(MACOS_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "macos: run this on macOS, or set MACOS_CC (osxcross, e.g. MACOS_CC=o64-clang)" >&2
 	@exit 1
@@ -296,14 +296,14 @@ endif
 macos-amd64:
 ifeq ($(HOST),macos)
 	@mkdir -p $(BUILD)/macos-amd64
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-amd64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(MACOS_AMD64_CC),)
 	@command -v $(MACOS_AMD64_CC) >/dev/null 2>&1 || { \
 	  echo "macos-amd64: $(MACOS_AMD64_CC) not found." >&2; \
 	  echo "  macOS -> amd64: osxcross, set MACOS_AMD64_CC=x86_64-apple-darwin21-clang" >&2; \
 	  echo "  or set MACOS_AMD64_CC=o64-clang" >&2; exit 1; }
 	@mkdir -p $(BUILD)/macos-amd64
-	$(MACOS_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(MACOS_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-amd64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "macos-amd64: run this on macOS, or set MACOS_AMD64_CC (osxcross)" >&2
 	@exit 1
@@ -313,14 +313,14 @@ endif
 macos-arm64:
 ifeq ($(HOST),macos)
 	@mkdir -p $(BUILD)/macos-arm64
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(MACOS_ARM64_CC),)
 	@command -v $(MACOS_ARM64_CC) >/dev/null 2>&1 || { \
 	  echo "macos-arm64: $(MACOS_ARM64_CC) not found." >&2; \
 	  echo "  macOS -> arm64: osxcross, set MACOS_ARM64_CC=aarch64-apple-darwin21-clang" >&2; \
 	  echo "  or set MACOS_ARM64_CC=o64-clang" >&2; exit 1; }
 	@mkdir -p $(BUILD)/macos-arm64
-	$(MACOS_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(MACOS_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/macos-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "macos-arm64: run this on macOS, or set MACOS_ARM64_CC (osxcross)" >&2
 	@exit 1
@@ -343,10 +343,10 @@ macos-universal:
 termux:
 ifeq ($(HOST),termux)
 	@mkdir -p $(BUILD)/termux
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(TERMUX_CC),)
 	@mkdir -p $(BUILD)/termux
-	$(TERMUX_CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(TERMUX_CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "termux: run this in Termux, or set TERMUX_CC (Android NDK clang," >&2
 	@echo "        e.g. TERMUX_CC=aarch64-linux-android21-clang)" >&2
@@ -357,7 +357,7 @@ endif
 termux-arm64:
 ifeq ($(HOST),termux)
 	@mkdir -p $(BUILD)/termux-arm64
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(TERMUX_CC),)
 	@command -v $(TERMUX_CC) >/dev/null 2>&1 || { \
 	  echo "termux-arm64: $(TERMUX_CC) not found." >&2; \
@@ -365,7 +365,7 @@ else ifneq ($(TERMUX_CC),)
 	  echo "  or set TERMUX_CC=aarch64-linux-android21-clang" >&2; \
 	  exit 1; }
 	@mkdir -p $(BUILD)/termux-arm64
-	$(TERMUX_CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(TERMUX_CC) $(CFLAGS) $(WARN) -o $(BUILD)/termux-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "termux-arm64: run this in Termux, or set TERMUX_CC (Android NDK clang," >&2
 	@echo "        e.g. TERMUX_CC=aarch64-linux-android21-clang)" >&2
@@ -376,10 +376,10 @@ endif
 bsd:
 ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_CC),)
 	@mkdir -p $(BUILD)/bsd
-	$(BSD_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(BSD_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "bsd: run this on FreeBSD/OpenBSD/NetBSD, or set BSD_CC" >&2
 	@exit 1
@@ -389,13 +389,13 @@ endif
 bsd-386:
 ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-386
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-386/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-386/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_386_CC),)
 	@command -v $(BSD_386_CC) >/dev/null 2>&1 || { \
 	  echo "bsd-386: $(BSD_386_CC) not found." >&2; \
 	  echo "  set BSD_386_CC to a *BSD i386 cross compiler" >&2; exit 1; }
 	@mkdir -p $(BUILD)/bsd-386
-	$(BSD_386_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-386/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(BSD_386_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-386/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "bsd-386: run this on *BSD, or set BSD_386_CC" >&2
 	@exit 1
@@ -405,13 +405,13 @@ endif
 bsd-amd64:
 ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-amd64
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-amd64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_AMD64_CC),)
 	@command -v $(BSD_AMD64_CC) >/dev/null 2>&1 || { \
 	  echo "bsd-amd64: $(BSD_AMD64_CC) not found." >&2; \
 	  echo "  set BSD_AMD64_CC to a *BSD x86_64 cross compiler" >&2; exit 1; }
 	@mkdir -p $(BUILD)/bsd-amd64
-	$(BSD_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-amd64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(BSD_AMD64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-amd64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "bsd-amd64: run this on *BSD, or set BSD_AMD64_CC" >&2
 	@exit 1
@@ -421,13 +421,13 @@ endif
 bsd-arm:
 ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-arm
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_ARM_CC),)
 	@command -v $(BSD_ARM_CC) >/dev/null 2>&1 || { \
 	  echo "bsd-arm: $(BSD_ARM_CC) not found." >&2; \
 	  echo "  set BSD_ARM_CC to a *BSD arm cross compiler" >&2; exit 1; }
 	@mkdir -p $(BUILD)/bsd-arm
-	$(BSD_ARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(BSD_ARM_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "bsd-arm: run this on *BSD, or set BSD_ARM_CC" >&2
 	@exit 1
@@ -437,13 +437,13 @@ endif
 bsd-arm64:
 ifeq ($(HOST),bsd)
 	@mkdir -p $(BUILD)/bsd-arm64
-	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else ifneq ($(BSD_ARM64_CC),)
 	@command -v $(BSD_ARM64_CC) >/dev/null 2>&1 || { \
 	  echo "bsd-arm64: $(BSD_ARM64_CC) not found." >&2; \
 	  echo "  set BSD_ARM64_CC to a *BSD aarch64 cross compiler" >&2; exit 1; }
 	@mkdir -p $(BUILD)/bsd-arm64
-	$(BSD_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm64/$(APP) $(SRC) $(LDFLAGS) $(LDLIBS)
+	$(BSD_ARM64_CC) $(CFLAGS) $(WARN) -o $(BUILD)/bsd-arm64/$(APP) $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS) $(LDLIBS)
 else
 	@echo "bsd-arm64: run this on *BSD, or set BSD_ARM64_CC" >&2
 	@exit 1
@@ -528,7 +528,7 @@ endif
 # Build with MSVC from a "Developer Command Prompt for VS" that also has GNU
 # make on PATH.  (Plain nmake uses the same command line.)
 windows-msvc:
-	cl /nologo /O2 /W3 $(SRC) /link bcrypt.lib
+	cl /nologo /O2 /W3 $(SRC) $(BENC_EXTRA_SRC) /link bcrypt.lib
 
 # --------------------------------------------------------------- dos ------
 dos:
@@ -541,7 +541,7 @@ else
 	  echo "  install DJGPP and put its bin directory on PATH," >&2; \
 	  echo "  or set DOS_CC=/path/to/i586-pc-msdosdjgpp-gcc" >&2; exit 1; }
 	@mkdir -p $(BUILD)/dos
-	$(DOS_CC) $(CFLAGS) $(WARN) $(DOS_EXTRA) -o $(BUILD)/dos/$(APP).exe $(SRC) $(BENC_EXTRA_SRC) $(LDFLAGS)
+	$(DOS_CC) $(CFLAGS) $(WARN) $(DOS_EXTRA) -o $(BUILD)/dos/$(APP).exe $(SRC) $(LDFLAGS)
 endif
 
 # -------------------------------------------------------- every platform --

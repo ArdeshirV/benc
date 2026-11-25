@@ -220,7 +220,9 @@ static inline const char *benc_base_name(const char *path)
 
 const char *benc_ram_temp_dir(void);
 
+#if BENC_POSIX
 static int benc_copy_file(const char *from, const char *to);
+#endif
 
 static inline int benc_rename_over(const char *from, const char *to)
 {

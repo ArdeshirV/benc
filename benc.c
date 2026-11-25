@@ -3018,6 +3018,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     h.size_known = (stream_size(in, &h.size) == 0);
 
     h.mode = o->kem_pub_key ? (o->kem_mode ? o->kem_mode : 1) : 0;
+    #if !BENC_DOS
     if (o->kem_pub_key) {
         FILE *kf = fopen(o->kem_pub_key, "rb");
         uint8_t pk[BENC_KEM_PUBLIC_KEY_LEN];
@@ -3049,6 +3050,7 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
         benc_kem_free(kem);
     }
 
+    #endif
     if (benc_random(h.salt, sizeof h.salt) || benc_random(h.nonce, sizeof h.nonce)) {
         fail("no source of random bytes available");
         goto done;
@@ -3587,6 +3589,7 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         goto done;
     }
 
+    #if !BENC_DOS
     if (o->kem_secret_key) {
         FILE *kf = fopen(o->kem_secret_key, "rb");
         uint8_t sk[BENC_KEM_SECRET_KEY_LEN];
@@ -3629,7 +3632,9 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
             goto done;
         }
         tries = BENC_MAX_TRIES; /* skip loop */
-    } else {
+    } else
+    #endif
+    {
     for (tries = 0; tries < BENC_MAX_TRIES; tries++) {
         if (get_password(o, pw, sizeof pw, 0, lead, &inter))
             goto done;
@@ -4357,6 +4362,7 @@ int main(int argc, char **argv)
         return g_exit ? g_exit : RC_USAGE;
     ui_init(o.quiet);
 
+    #if !BENC_DOS
     if (o.keygen) {
         const char *base = o.output ? o.output : "kem";
         benc_kem *kem = benc_kem_new("ml-kem-768");
@@ -4379,6 +4385,8 @@ int main(int argc, char **argv)
         printf("Generated key pair: %s.pub / %s.priv\n", base, base);
         return RC_OK;
     }
+    #endif
+
 
     if (cmd == C_INFO) {
         if (npos != 1)
