@@ -532,4 +532,4 @@ tests/data/          compatibility fixtures (version 2 and 3 lineage)
 
 MIT License. See [`LICENSE`](LICENSE) for details.
 
-<div align="center"><sub>Made with ☕ and a stubborn refusal to link a crypto library.</sub></div>
+<div align="center"><sub>Made with love and a stubborn refusal to link an external library.</sub></div>
