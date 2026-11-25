@@ -127,7 +127,7 @@ static void shake256(const uint8_t *in, size_t inlen, uint8_t *out, size_t outle
 #define KEM_DU 10
 #define KEM_DV 4
 
-static const int16_t zetas[128] = {
+static const int16_t zetas[142] = {
     2285,2571,2970,1812,1493,1422,287,202,3158,622,1577,182,962,2127,
     1855,1468,573,2004,264,383,2500,1458,1727,3199,2648,1017,732,608,
     1726,402,2647,1018,3298,369,286,2955,2689,1614,1463,2457,346,449,
@@ -175,10 +175,10 @@ static void poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[2
     for (i = 0; i < 256; i++) r[i] = (int16_t)(((int32_t)a[i]*b[i]) % KEM_Q);
 }
 
-static void poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+static __attribute__((unused)) void poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     int i; for (i=0;i<256;i++) r[i]=(a[i]+b[i])%KEM_Q;
 }
-static void poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+static __attribute__((unused)) void poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     int i; for (i=0;i<256;i++) r[i]=(a[i]-b[i]+KEM_Q)%KEM_Q;
 }
 
@@ -226,12 +226,12 @@ static void poly_decode(int16_t a[256], const uint8_t *r, int d) {
 typedef struct { int16_t v[KEM_K][KEM_N]; } pvec;
 
 static void pvec_ntt(pvec *v){ int i; for(i=0;i<KEM_K;i++) ntt(v->v[i]); }
-static void pvec_intt(pvec *v){ int i; for(i=0;i<KEM_K;i++) intt(v->v[i]); }
-static void pvec_add(pvec *r,const pvec*a,const pvec*b){ int i,j; for(i=0;i<KEM_K;i++) for(j=0;j<KEM_N;j++) r->v[i][j]=(a->v[i][j]+b->v[i][j])%KEM_Q; }
-static void pvec_sub(pvec *r,const pvec*a,const pvec*b){ int i,j; for(i=0;i<KEM_K;i++) for(j=0;j<KEM_N;j++) r->v[i][j]=(a->v[i][j]-b->v[i][j]+KEM_Q)%KEM_Q; }
+static __attribute__((unused)) void pvec_intt(pvec *v){ int i; for(i=0;i<KEM_K;i++) intt(v->v[i]); }
+static __attribute__((unused)) void pvec_add(pvec *r,const pvec*a,const pvec*b){ int i,j; for(i=0;i<KEM_K;i++) for(j=0;j<KEM_N;j++) r->v[i][j]=(a->v[i][j]+b->v[i][j])%KEM_Q; }
+static __attribute__((unused)) void pvec_sub(pvec *r,const pvec*a,const pvec*b){ int i,j; for(i=0;i<KEM_K;i++) for(j=0;j<KEM_N;j++) r->v[i][j]=(a->v[i][j]-b->v[i][j]+KEM_Q)%KEM_Q; }
 
 /* inner product: r = sum a[i]*b[i] (base mul, result in r[0..]) */
-static void pvec_dot(int16_t r[KEM_N], const pvec *a, const pvec *b) {
+static __attribute__((unused)) void pvec_dot(int16_t r[KEM_N], const pvec *a, const pvec *b) {
     int i,j; int16_t acc[KEM_N]; memset(acc,0,sizeof acc);
     for (i=0;i<KEM_K;i++) {
         int16_t tmp[KEM_N];
@@ -329,7 +329,7 @@ static void kpke_encrypt(const uint8_t *pk, const uint8_t m[32], const uint8_t r
     memcpy(rho, pk + KEM_K*KEM_N*12/8, 32);
     gen_matrix(A, rho, 1); /* transpose */
     for (int i2=0;i2<KEM_K;i2++) for (int j2=0;j2<KEM_K;j2++) ntt(A[i2].v[j2]);
-    pvec rvec, e1, u, vtmp;
+    pvec rvec, e1, u;
     memset(&rvec,0,sizeof rvec); memset(&e1,0,sizeof e1);
     sample_vec(&rvec, r, KEM_ETA1, 0);
     sample_vec(&e1, r, KEM_ETA2, KEM_K);
@@ -382,7 +382,6 @@ static void kpke_encrypt(const uint8_t *pk, const uint8_t m[32], const uint8_t r
     /* c2: compress v with dv */
     uint8_t *c2 = c + KEM_K*KEM_N*KEM_DU/8;
     for (int i=0;i<KEM_N;i++) {
-        uint32_t val = comp(v[i], KEM_DV);
         /* pack dv bits */
     }
     /* pack c2 manually */
@@ -399,7 +398,7 @@ static void kpke_encrypt(const uint8_t *pk, const uint8_t m[32], const uint8_t r
 
 /* K-PKE.Decrypt(sk, c) -> m */
 static void kpke_decrypt(const uint8_t *sk, const uint8_t *c, uint8_t m[32]) {
-    pvec s, u, v;
+    pvec s, u;
     pvec_decode(&s, sk, 12);
     /* s is already in NTT form (stored as NTT(s) in keygen) */
     /* decompress c1 */
@@ -495,6 +494,7 @@ int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen,
 int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
                          const uint8_t *ct, size_t ctlen,
                          const uint8_t *sk, size_t sklen) {
+    (void)sklen;
     if (!kem || !ss || !sslen || !ct || !sk) return -1;
     /* sk = sk_pke || pk || H(pk) || z */
     const uint8_t *sk_pke = sk;
