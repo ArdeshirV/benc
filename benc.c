@@ -4112,8 +4112,8 @@ static void usage(FILE *fp)
         "\n"
         "Commands:\n"
         "  (no command)       Detect by the BENC header and do the right thing\n"
-        "  encrypt, enc, e    Encrypt <input> into a text file (default %s)\n"
-        "  decrypt, dec, d    Decrypt a benc text file (default %s)\n"
+        "  encrypt, enc, e    Encrypt <input> (default %s)\n"
+        "  decrypt, dec, d    Decrypt a benc container (default %s)\n"
         "  info               Show container header (password not required)\n"
         "  selftest           Run built-in cryptographic self tests\n"
         "\n"
@@ -4131,6 +4131,10 @@ static void usage(FILE *fp)
         "  -T, --threads N        Worker threads for the compressor (0 = all)\n"
         "  -f, --force            Overwrite an existing output file\n"
         "  -n, --use-header-name  On decrypt, restore the stored file name\n"
+        "  -k, --kem FILE         Post-quantum public key (encrypt, ML-KEM-768)\n"
+        "  --key FILE             Post-quantum private key (decrypt)\n"
+        "  --hybrid               Hybrid: password master + KEM shared secret\n"
+        "  --keygen               Generate an ML-KEM-768 key pair (--output base)\n"
         "  -q, --quiet            No progress and no result message\n"
         "  -h, --help             Show this help\n"
         "  -v, --version          Show version\n"
@@ -4144,14 +4148,14 @@ static void usage(FILE *fp)
         "\n"
         "Container format:\n"
         "  PBKDF2-HMAC-SHA256 keys, ChaCha20 encryption, HMAC-SHA256 tag.\n"
-        "  The output is a plain ASCII text file (.bct) or a tight binary\n"
-        "  container (.bcb with --binout).\n",
+        "  Binary container (.bcb) by default; ASCII text container (.bct)\n"
+        "  with --textout. Post-quantum: ML-KEM-768 (container format v5).\n",
         BENC_NAME, BENC_VERSION, BENC_NAME, BENC_NAME, BENC_NAME, BENC_NAME,
         BENC_NAME,
 #if BENC_DOS
-        "<input>.BCT", "the stored name",
+        "<input>.BCB", "the stored name",
 #else
-        "<input>.bct", "strips .bct",
+        "<input>.bcb", "strips .bcb/.bct",
 #endif
         BENC_DEFAULT_ITER);
 }
