@@ -6,7 +6,7 @@
  * Windows executables by the windows-* Makefile targets.
  *
  * Keep the FILEVERSION / PRODUCTVERSION numbers in sync with BENC_VERSION in
- * benc.c (currently 1.6.0).
+ * benc.c (currently 1.7.0).
  */
 
 #include <windows.h>
@@ -17,8 +17,8 @@
 1 ICON "img/benc.ico"
 
 1 VERSIONINFO
-FILEVERSION    1,6,0,0
-PRODUCTVERSION 1,6,0,0
+FILEVERSION    1,7,0,0
+PRODUCTVERSION 1,7,0,0
 FILEFLAGSMASK  0x3fL
 FILEFLAGS      0x0L
 FILEOS         VOS_NT_WINDOWS32
@@ -31,12 +31,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "ArdeshirV"
             VALUE "FileDescription",  "benc - portable password based file encryption"
-            VALUE "FileVersion",      "1.6.0"
+            VALUE "FileVersion",      "1.7.0"
             VALUE "InternalName",     "benc"
             VALUE "LegalCopyright",   "ArdeshirV, see LICENSE"
             VALUE "OriginalFilename", "benc.exe"
             VALUE "ProductName",      "benc"
-            VALUE "ProductVersion",   "1.6.0"
+            VALUE "ProductVersion",   "1.7.0"
         END
     END
     BLOCK "VarFileInfo"
