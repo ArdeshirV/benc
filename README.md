@@ -6,12 +6,12 @@
 
 **Tiny, dependency-free file & directory encryption — one password, one file.**
 
-<i>Binary-tight by default · ASCII-safe on request · From DOS to macOS</i>
+<i>Binary-tight by default · ASCII-safe on request · Everywhere</i>
 
 <p>
   <img alt="C99" src="https://img.shields.io/badge/language-C99-2b6cb0?style=for-the-badge&logo=c&logoColor=white" />
   <img alt="no dependencies" src="https://img.shields.io/badge/dependencies-none-38a169?style=for-the-badge" />
-  <img alt="platforms" src="https://img.shields.io/badge/platforms-DOS%20·%20Windows%20·%20macOS%20·%20Linux%20·%20BSD%20·%20Termux-805ad5?style=for-the-badge" />
+  <img alt="platforms" src="https://img.shields.io/badge/platforms-Windows%20·%20macOS%20·%20Linux%20·%20BSD%20·%20Termux-805ad5?style=for-the-badge" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-718096?style=for-the-badge" />
 </p>
 
@@ -21,7 +21,7 @@
 
 ## 🔐 Technical Summary
 
-> **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum Kyber-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, FreeBSD, and DOS** with **no runtime dependencies at all** — the pq-crystals Kyber-768 reference implementation is vendored in-tree.
+> **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum Kyber-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, and FreeBSD** with **no runtime dependencies at all** — the pq-crystals Kyber-768 reference implementation is vendored in-tree.
 
 ---
 
@@ -32,7 +32,6 @@
 - [🧭 Usage](#usage)
 - [🔑 Passwords & stdin](#passwords-stdin)
 - [🗜️ Compression & directories](#compression-directories)
-- [💾 16-bit DOS](#16-bit-dos)
 - [📜 Container format](#container-format)
 - [🌌 Post-quantum container (version 5)](#post-quantum-container-v5)
 - [🛡️ Security notes](#security-notes)
@@ -59,14 +58,14 @@ recognised by its magic and decrypted transparently.
 
 | 🎯 One password | 🧊 Zero dependencies | 🌍 Everywhere | 🧾 Text-safe |
 |:---:|:---:|:---:|:---:|
-| encrypt & decrypt files **and** folders | crypto + codecs in-tree | DOS → Windows → macOS → Linux → BSD → Termux | ASCII/base64 containers on demand |
+| encrypt & decrypt files **and** folders | crypto + codecs in-tree | Windows → macOS → Linux → BSD → Termux | ASCII/base64 containers on demand |
 
 </div>
 
 > 🧬 **Self-contained by design.** SHA-256, HMAC, PBKDF2, ChaCha20, base64, the
 > container parser **and** both LZMA2 and Zstd codecs live in this source tree.
 > No OpenSSL, no libsodium, no `xz`/`zstd` binaries — just a C99 compiler. That
-> is what lets the same code run on a 16-bit DOS box and a modern Mac.
+> is what lets the same code run on a low-end box and a modern Mac.
 
 ---
 
@@ -235,28 +234,6 @@ shows them **without the password**.
 
 ---
 
-<a id="16-bit-dos"></a>
-## 💾 16-bit DOS
-
-The DOS build is 16-bit: `size_t` holds 16 bits and a single object cannot
-exceed 64 KiB — less than the compression tables need. The codecs **degrade
-instead of failing**:
-
-- 🧊 **Zstd** stores *raw (uncompressed) blocks*. Frames are still standard
-  Zstd and decode normally with the `zstd` tool or on any other platform. A
-  Zstd frame that uses compressed blocks (e.g. from a PC container) cannot be
-  decompressed on DOS and is rejected with an error.
-- 🧱 **LZMA2** always emits valid chunks. When the match finder does not fit it
-  writes uncompressed chunks, so the result is larger but still `xz`-compatible,
-  and compressed LZMA2 streams from other platforms decompress normally.
-- 📉 The 16-bit heap is under 64 KiB total, so only small payloads work: in
-  testing a 20 KB file round-tripped while a 60 KB one failed before
-  compression started.
-
-> 🖥️ Compress and encrypt large inputs on a 32-bit or 64-bit platform.
-
----
-
 <a id="container-format"></a>
 ## 📜 Container format
 
@@ -378,9 +355,8 @@ line options are `--kem`, `--key`, `--hybrid` and `--keygen`.
 | 🫥 **No partial plaintext** | The whole container is authenticated *before* the output file is created. A wrong password or a modified file leaves no plaintext behind. Compressed payloads are decrypted and decompressed into private (`0600`) temporary files that are removed afterwards and by the interrupt handler. |
 | 🗝️ **Password handling** | Passwords are never stored. Keys are wiped from memory after use. |
 | 👁️ **Metadata** | Original file name and size live in the header and are covered by the tag, but are **not secret**: `benc info` shows them without the password. The size is always visible because it sets the payload length. |
-| 🎲 **Randomness** | `/dev/urandom` on POSIX, `BCryptGenRandom` on Windows. Plain DOS has no OS entropy: the fallback mixes clock and addresses into a SHA-256 generator and prints a warning — treat DOS-made containers as weaker and re-encrypt on a modern system. |
-| 🧹 **Temp files** | The tar archive, compressed payload and staged output live on the OS RAM disk (`/dev/shm` on Linux, temp dir on Windows, `/tmp` on DOS), so plaintext never lands on recoverable disk. The result is moved into place only after it is fully written. |
-| 🚨 **DOS caveat** | DOS has no `kill`/`raise`, so Ctrl-C cleanup (terminal restore, removing a half-written temp file) is disabled there; an interrupted run may leave a temp file behind. |
+| 🎲 **Randomness** | `/dev/urandom` on POSIX, `BCryptGenRandom` on Windows.  |
+| 🧹 **Temp files** | The tar archive, compressed payload and staged output live on the OS RAM disk (`/dev/shm` on Linux, temp dir on Windows), so plaintext never lands on recoverable disk. The result is moved into place only after it is fully written. |
 | 🕵️ **Indistinguishable errors** | A wrong password and a tampered file produce the same error on purpose. |
 
 > 🧪 This is a compact, auditable implementation — **not** a substitute for
@@ -447,7 +423,6 @@ make windows-386      # -> build/windows-386/benc.exe
 make windows-arm      # -> build/windows-arm/benc.exe
 make windows-arm64    # -> build/windows-arm64/benc.exe
 make windows-msvc     # build with MSVC (cl) from a VS developer prompt
-make dos              # -> build/dos/benc.exe
 make nace-drex        # optional Nace Drex client -> build/nace/nace-drex
 make all-platforms    # build every platform whose toolchain is installed
 make check            # show which toolchains were detected
@@ -479,7 +454,6 @@ any of them on the command line.
 | :--- | :--- | :--- |
 | `windows-amd64` | `WIN64_CC` (`x86_64-w64-mingw32-gcc`) | `gcc-mingw-w64-x86-64` |
 | `windows-386` | `WIN32_CC` (`i686-w64-mingw32-gcc`) | `gcc-mingw-w64-i686` |
-| `dos` | `DOS_CC` (`ia16-elf-gcc`) | `ia16-elf-gcc` |
 | `macos` | `MACOS_CC` (osxcross `o64-clang`) | osxcross |
 | `termux` | `TERMUX_CC` (`aarch64-linux-android21-clang`) | Android NDK |
 | `linux` from a non-Linux host | `LINUX_CC` | any Linux cross gcc |
@@ -498,13 +472,10 @@ make DEBUG=1                 # -O0 -g3
 | Linux, macOS, Termux, *BSD | `cc -std=c99 -O2 -o benc benc.c benc_codecs.c benc_tar.c` |
 | Windows, MSVC | `cl /O2 /W3 benc.c benc_codecs.c benc_tar.c bcrypt.lib /Fe:benc.exe` |
 | Windows, MinGW | `gcc -std=c99 -O2 -o benc.exe benc.c benc_codecs.c benc_tar.c -lbcrypt` |
-| DOS, ia16 | `ia16-elf-gcc -std=c99 -O2 -mcmodel=medium -o benc.exe benc.c benc_codecs.c benc_tar.c` |
 
 Only a C99 compiler is needed; all three source files are compiled together. The
-DOS build targets 16-bit x86 with the medium memory model (`-mcmodel=medium`);
 the default tiny model is too small. Because `size_t` is 16 bits there, Zstd
 payloads are stored uncompressed and only small files fit in memory — see
-[16-bit DOS](#16-bit-dos).
 
 ---
 

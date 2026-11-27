@@ -17,15 +17,9 @@
 #if defined(_WIN32)
 #  define BENC_WINDOWS 1
 #  define BENC_POSIX   0
-#  define BENC_DOS     0
-#elif defined(__DJGPP__) || defined(__MSDOS__) || defined(_DOS) || defined(__ia16__)
-#  define BENC_WINDOWS 0
-#  define BENC_POSIX   0
-#  define BENC_DOS     1
 #else
 #  define BENC_WINDOWS 0
 #  define BENC_POSIX   1
-#  define BENC_DOS     0
 #endif
 
 #if BENC_WINDOWS
@@ -43,8 +37,6 @@
 #  include <fcntl.h>
 #  include <dirent.h>
 #  include <termios.h>
-#elif BENC_DOS
-#  include <unistd.h>
 #endif
 
 /* ---------------------------------------------------------------- */
@@ -78,8 +70,6 @@ static inline unsigned long benc_now_ms(void)
     if (gettimeofday(&tv, NULL) != 0)
         return 0;
     return (unsigned long)tv.tv_sec * 1000ul + (unsigned long)(tv.tv_usec / 1000);
-#elif BENC_DOS
-    return (unsigned long)((unsigned long)clock() * 1000ul / (unsigned long)CLOCKS_PER_SEC);
 #else
     return (unsigned long)time(NULL) * 1000ul;
 #endif
@@ -220,9 +210,7 @@ static inline const char *benc_base_name(const char *path)
 
 const char *benc_ram_temp_dir(void);
 
-#if BENC_POSIX
 static int benc_copy_file(const char *from, const char *to);
-#endif
 
 static inline int benc_rename_over(const char *from, const char *to)
 {

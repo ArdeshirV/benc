@@ -15,14 +15,6 @@
 
 struct benc_kem { int dummy; };
 
-#if BENC_DOS
-/* DOS: post-quantum KEM unavailable; password-only mode. */
-benc_kem *benc_kem_new(const char *alg) { (void)alg; return NULL; }
-void benc_kem_free(benc_kem *kem) { (void)kem; }
-int benc_kem_keypair(benc_kem *kem, uint8_t *pk, size_t *pklen, uint8_t *sk, size_t *sklen) { (void)kem;(void)pk;(void)pklen;(void)sk;(void)sklen; return -1; }
-int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen, uint8_t *ss, size_t *sslen, const uint8_t *pk, size_t pklen) { (void)kem;(void)ct;(void)ctlen;(void)ss;(void)sslen;(void)pk;(void)pklen; return -1; }
-int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen, const uint8_t *ct, size_t ctlen, const uint8_t *sk, size_t sklen) { (void)kem;(void)ss;(void)sslen;(void)ct;(void)ctlen;(void)sk;(void)sklen; return -1; }
-#else
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,4 +87,3 @@ int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
     *sslen = BENC_KEM_SHARED_SECRET_LEN;
     return 0;
 }
-#endif /* BENC_DOS */

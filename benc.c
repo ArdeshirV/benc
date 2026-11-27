@@ -31,8 +31,7 @@
  * is finished.
  */
 
-#if !defined(_WIN32) && !defined(__DJGPP__) && !defined(__MSDOS__) && \
-    !defined(_DOS)
+#if !defined(_WIN32)
 #  ifndef _POSIX_C_SOURCE
 #    define _POSIX_C_SOURCE 200809L
 #  endif
@@ -83,19 +82,11 @@
 #define BENC_B64_BLOCK    48            /* input bytes per output line    */
 #define BENC_B64_COLS     64            /* base64 characters per line     */
 
-#if BENC_DOS
-#  define BENC_CHUNK      (BENC_B64_BLOCK * 128)       /* 6 KiB           */
-#  define BENC_RBUF       4096
-#  define BENC_OBUF       1536
-#  define BENC_COPY_BUF  1024
-#  define BENC_MAX_PASSWORD 256
-#else
 #  define BENC_CHUNK      (BENC_B64_BLOCK * 1024)      /* 48 KiB          */
 #  define BENC_RBUF       65536
 #  define BENC_OBUF       16384
 #  define BENC_COPY_BUF  65536
 #  define BENC_MAX_PASSWORD 1024
-#endif
 
 #define BENC_PROGRESS_MS  150
 #define BENC_MAX_TRIES    3
@@ -2031,7 +2022,7 @@ static int same_file(const char *a, const char *b)
     if (stat(a, &sa) == 0 && stat(b, &sb) == 0)
         return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
     return strcmp(a, b) == 0;
-#elif BENC_WINDOWS || BENC_DOS
+#elif BENC_WINDOWS
     return ci_equal(a, b);
 #else
     return strcmp(a, b) == 0;
@@ -2116,15 +2107,6 @@ static char *xstrdup_cat(const char *a, size_t alen, const char *b)
     return p;
 }
 
-#if BENC_DOS
-/* DOS file names are 8.3: replace the extension instead of appending */
-static size_t stem_len(const char *path)
-{
-    const char *b = base_name(path), *dot = strrchr(b, '.');
-
-    return dot && dot != b ? (size_t)(dot - path) : strlen(path);
-}
-#endif
 
 static char *benc_nosep_dup(const char *path)
 {
@@ -2145,11 +2127,7 @@ static char *default_output_name(const char *in, const char *ext)
 {
     char *t = benc_nosep_dup(in);
     char *r;
-#if BENC_DOS
-    r = t ? xstrdup_cat(t, stem_len(t), ext) : NULL;
-#else
     r = t ? xstrdup_cat(t, strlen(t), ext) : NULL;
-#endif
     free(t);
     return r;
 }
@@ -2157,21 +2135,13 @@ static char *default_output_name(const char *in, const char *ext)
 static char *default_encrypt_output(const char *in)
 {
     return default_output_name(in,
-#if BENC_DOS
-                               ".BCT");
-#else
                                ".bct");
-#endif
 }
 
 static char *default_binary_output(const char *in)
 {
     return default_output_name(in,
-#if BENC_DOS
-                               ".BBC");
-#else
                                ".bcb");
-#endif
 }
 
 static char *default_decrypt_output(const char *in)
@@ -2184,11 +2154,7 @@ static char *default_decrypt_output(const char *in)
         return xstrdup_cat(in, n - 4, "");
     if (n > 5 && ci_equal(in + n - 5, ".benc"))
         return xstrdup_cat(in, n - 5, "");
-#if BENC_DOS
-    return xstrdup_cat(in, stem_len(in), ".DEC");
-#else
     return xstrdup_cat(in, n, ".dec");
-#endif
 }
 
 /* output path inside the directory of 'in' using the stored file name */
@@ -2215,8 +2181,7 @@ static const char *ram_temp_dir(void)
     if (n > 0 && (size_t)n < sizeof buf)
         return buf;
     return "C:\\Windows\\Temp";
-#elif BENC_DOS
-    return "/tmp";
+
 #else
     return "/dev/shm";
 #endif
@@ -3060,7 +3025,6 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
     h.size_known = (stream_size(in, &h.size) == 0);
 
     h.mode = o->kem_pub_key ? (o->kem_mode ? o->kem_mode : 1) : 0;
-    #if !BENC_DOS
     if (o->kem_pub_key) {
         FILE *kf = fopen(o->kem_pub_key, "rb");
         uint8_t pk[BENC_KEM_PUBLIC_KEY_LEN];
@@ -3092,7 +3056,6 @@ static int cmd_encrypt(const char *in_path, const char *out_path, const opts *o)
         benc_kem_free(kem);
     }
 
-    #endif
     if (benc_random(h.salt, sizeof h.salt) || benc_random(h.nonce, sizeof h.nonce)) {
         fail("no source of random bytes available");
         goto done;
@@ -3672,7 +3635,6 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         goto done;
     }
 
-    #if !BENC_DOS
     if (o->kem_secret_key) {
         FILE *kf = fopen(o->kem_secret_key, "rb");
         uint8_t sk[BENC_KEM_SECRET_KEY_LEN];
@@ -3716,7 +3678,6 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         }
         tries = BENC_MAX_TRIES; /* skip loop */
     } else
-    #endif
     {
     for (tries = 0; tries < BENC_MAX_TRIES; tries++) {
         if (get_password(o, pw, sizeof pw, 0, lead, &inter))
@@ -4238,11 +4199,7 @@ static void usage(FILE *fp)
         "  with --textout. Post-quantum: ML-KEM-768 (container format v5).\n",
         BENC_NAME, BENC_VERSION, BENC_NAME, BENC_NAME, BENC_NAME, BENC_NAME,
         BENC_NAME,
-#if BENC_DOS
-        "<input>.BCB", "the stored name",
-#else
         "<input>.bcb", "strips .bcb/.bct",
-#endif
         BENC_DEFAULT_ITER);
 }
 
@@ -4452,7 +4409,6 @@ int main(int argc, char **argv)
         return g_exit ? g_exit : RC_USAGE;
     ui_init(o.quiet);
 
-    #if !BENC_DOS
     if (o.keygen) {
         const char *base = o.output ? o.output : "kem";
         benc_kem *kem = benc_kem_new("ml-kem-768");
@@ -4475,8 +4431,6 @@ int main(int argc, char **argv)
         printf("Generated key pair: %s.pub / %s.priv\n", base, base);
         return RC_OK;
     }
-    #endif
-
 
     if (cmd == C_INFO) {
         if (npos != 1)
@@ -4509,9 +4463,6 @@ int main(int argc, char **argv)
             FILE *fp;
 
             if (o.use_header_name
-#if BENC_DOS
-                || 1
-#endif
                 ) {
                 fp = fopen(in_path, "rb");
                 if (!fp)

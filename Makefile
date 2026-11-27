@@ -23,7 +23,6 @@
 #   make windows-386      Windows i686        -> build/windows-386/benc.exe
 #   make windows-arm      Windows arm32       -> build/windows-arm/benc.exe
 #   make windows-arm64    Windows arm64       -> build/windows-arm64/benc.exe
-#   make dos              MS-DOS (DJGPP)      -> build/dos/benc.exe
 #   make all-platforms    build every platform whose toolchain is installed
 #   make check            show which toolchains were detected
 #   make test             run the test suite with the native build
@@ -152,12 +151,6 @@ WINDRESARM  ?= arm-w64-mingw32-windres
 WINDRESARM64 ?= aarch64-w64-mingw32-windres
 # Windows resource script: embeds img/benc.ico + version info into the .exe.
 WINRC      ?= benc.rc
-DOS_CC     ?= ia16-elf-gcc
-ifeq ($(findstring ia16,$(DOS_CC)),ia16)
-  DOS_EXTRA ?= -mcmodel=medium
-else
-  DOS_EXTRA ?=
-endif
 MACOS_CC      ?= $(if $(shell command -v o64-clang 2>/dev/null),o64-clang,)
 MACOS_AMD64_CC ?= $(if $(shell command -v x86_64-apple-darwin24.1-clang 2>/dev/null),x86_64-apple-darwin24.1-clang,)
 MACOS_ARM64_CC ?= $(if $(shell command -v aarch64-apple-darwin24.1-clang 2>/dev/null),aarch64-apple-darwin24.1-clang,)
@@ -536,23 +529,9 @@ endif
 windows-msvc:
 	cl /nologo /O2 /W3 $(SRC) $(BENC_EXTRA_SRC) /link bcrypt.lib
 
-# --------------------------------------------------------------- dos ------
-dos:
-ifeq ($(HOST),windows)
-	@echo "dos: build with DJGPP on DOS, or cross build from Linux with DOS_CC" >&2
-	@exit 1
-else
-	@command -v $(DOS_CC) >/dev/null 2>&1 || { \
-	  echo "dos: $(DOS_CC) not found." >&2; \
-	  echo "  install DJGPP and put its bin directory on PATH," >&2; \
-	  echo "  or set DOS_CC=/path/to/i586-pc-msdosdjgpp-gcc" >&2; exit 1; }
-	@mkdir -p $(BUILD)/dos
-	$(DOS_CC) $(CFLAGS) $(WARN) $(DOS_EXTRA) -o $(BUILD)/dos/$(APP).exe $(SRC) $(LDFLAGS)
-endif
-
 # -------------------------------------------------------- every platform --
 all-platforms:
-ifneq (,$(filter windows dos,$(HOST)))
+ifneq (,$(filter windows,$(HOST)))
 	@echo "all-platforms is meant for Unix-like hosts; use 'make' here."
 else
 	@echo "building every platform whose toolchain is installed"
@@ -560,7 +539,7 @@ else
 	built=0; skipped=0; failed=0; \
 	for p in linux linux-386 linux-amd64 linux-arm linux-arm64 macos macos-amd64 macos-arm64 \
 	    termux termux-arm64 bsd bsd-386 bsd-amd64 bsd-arm bsd-arm64 windows-amd64 windows-386 \
-	    windows-arm windows-arm64 dos; do \
+	    windows-arm windows-arm64; do \
 	    printf '  %-16s ' "$$p"; \
 	    if $(MAKE) --no-print-directory $$p >"$$logs/$$p.log" 2>&1; then \
 	        echo built; built=$$((built + 1)); \
@@ -589,8 +568,7 @@ check:
 	@echo "native cc     : $(CC)"
 	@printf '%-14s: %s\n' "windows-amd64" "$(if $(shell command -v $(WIN64_CC) 2>/dev/null),$(WIN64_CC),not found)"
 	@printf '%-14s: %s\n' "windows-386"   "$(if $(shell command -v $(WIN32_CC) 2>/dev/null),$(WIN32_CC),not found)"
-	@printf '%-14s: %s\n' "dos"           "$(if $(shell command -v $(DOS_CC) 2>/dev/null),$(DOS_CC),not found)"
-	@printf '%-14s: %s\n' "macos"         "$(if $(MACOS_CC),$(MACOS_CC),$(if $(filter macos,$(HOST)),native cc,not found))"
+		@printf '%-14s: %s\n' "macos"         "$(if $(MACOS_CC),$(MACOS_CC),$(if $(filter macos,$(HOST)),native cc,not found))"
 	@printf '%-14s: %s\n' "termux"        "$(if $(TERMUX_CC),$(TERMUX_CC),not found)"
 	@printf '%-14s: %s\n' "termux-arm64"   "$(if $(TERMUX_CC),$(TERMUX_CC),not found)"
 	@printf '%-14s: %s\n' "bsd"           "$(if $(BSD_CC),$(BSD_CC),not found)"
