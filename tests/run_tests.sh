@@ -320,21 +320,58 @@ else
     KEMAVAIL=0
 fi
 if [ "$KEMAVAIL" = 1 ]; then
-    rm -f "$WORK/kem.priv" "$WORK/kem.pub" "$WORK/kem.bcb" "$WORK/kem.out" "$WORK/kem.bad.out"
-    "$BENC" --keygen --kem ml-kem-768 --output "$WORK/kem" >/dev/null 2>&1
+    rm -f "$WORK"/kem* "$WORK"/kempq* "$WORK"/kemhyb* "$WORK"/kembad*
+    # --- key generation ---
+    "$BENC" --keygen --output "$WORK/kem" >/dev/null 2>&1
     expect_rc "kem keygen succeeds" 0 $?
     [ -f "$WORK/kem.priv" ] && ok "kem private key written" || bad "kem private key missing"
     [ -f "$WORK/kem.pub" ]  && ok "kem public key written"  || bad "kem public key missing"
-    "$BENC" encrypt --kem "$WORK/kem.pub" -f "$WORK/text.txt" -o "$WORK/kem.bcb" >/dev/null 2>&1
-    expect_rc "kem encrypt succeeds" 0 $?
-    "$BENC" decrypt --key "$WORK/kem.priv" -f "$WORK/kem.bcb" -o "$WORK/kem.out" >/dev/null 2>&1
-    expect_rc "kem decrypt succeeds" 0 $?
-    cmp -s "$WORK/text.txt" "$WORK/kem.out" && ok "kem decrypt recovers plaintext" || bad "kem decrypt differs"
-    printf 'not a private key\n' > "$WORK/bad.priv"
-    "$BENC" decrypt --key "$WORK/bad.priv" -f "$WORK/kem.bcb" -o "$WORK/kem.bad.out" >/dev/null 2>&1
+    # second keypair for wrong-key rejection
+    "$BENC" --keygen --output "$WORK/kembad" >/dev/null 2>&1
+
+    # --- PQ-only mode (no password) on text file ---
+    "$BENC" encrypt --kem "$WORK/kem.pub" -f "$WORK/text.txt" -o "$WORK/kempq.bcb" >/dev/null 2>&1
+    expect_rc "pq encrypt (text) succeeds" 0 $?
+    "$BENC" decrypt --key "$WORK/kem.priv" -f "$WORK/kempq.bcb" -o "$WORK/kempq.out" >/dev/null 2>&1
+    expect_rc "pq decrypt (text) succeeds" 0 $?
+    cmp -s "$WORK/text.txt" "$WORK/kempq.out" && ok "pq text round-trip" || bad "pq text differs"
+
+    # --- PQ-only mode on binary data ---
+    "$BENC" encrypt --kem "$WORK/kem.pub" -f "$WORK/rand4k.bin" -o "$WORK/kempq2.bcb" >/dev/null 2>&1
+    expect_rc "pq encrypt (binary) succeeds" 0 $?
+    "$BENC" decrypt --key "$WORK/kem.priv" -f "$WORK/kempq2.bcb" -o "$WORK/kempq2.out" >/dev/null 2>&1
+    expect_rc "pq decrypt (binary) succeeds" 0 $?
+    cmp -s "$WORK/rand4k.bin" "$WORK/kempq2.out" && ok "pq binary round-trip" || bad "pq binary differs"
+
+    # --- PQ-only mode on empty file ---
+    "$BENC" encrypt --kem "$WORK/kem.pub" -f "$WORK/empty.bin" -o "$WORK/kempq3.bcb" >/dev/null 2>&1
+    expect_rc "pq encrypt (empty) succeeds" 0 $?
+    "$BENC" decrypt --key "$WORK/kem.priv" -f "$WORK/kempq3.bcb" -o "$WORK/kempq3.out" >/dev/null 2>&1
+    expect_rc "pq decrypt (empty) succeeds" 0 $?
+    cmp -s "$WORK/empty.bin" "$WORK/kempq3.out" && ok "pq empty round-trip" || bad "pq empty differs"
+
+    # --- hybrid mode (password + KEM) ---
+    printf '%s\n' "$PW" | "$BENC" encrypt --hybrid --kem "$WORK/kem.pub" -f "$WORK/text.txt" -o "$WORK/kemhyb.bcb" >/dev/null 2>&1
+    expect_rc "hybrid encrypt succeeds" 0 $?
+    printf '%s\n' "$PW" | "$BENC" decrypt --hybrid --key "$WORK/kem.priv" -f "$WORK/kemhyb.bcb" -o "$WORK/kemhyb.out" >/dev/null 2>&1
+    expect_rc "hybrid decrypt succeeds" 0 $?
+    cmp -s "$WORK/text.txt" "$WORK/kemhyb.out" && ok "hybrid round-trip" || bad "hybrid differs"
+
+    # --- hybrid with wrong password rejected ---
+    printf 'wrongpassword\n' | "$BENC" decrypt --hybrid --key "$WORK/kem.priv" -f "$WORK/kemhyb.bcb" -o "$WORK/kemhyb.bad.out" >/dev/null 2>&1
+    [ $? -ne 0 ] && ok "hybrid wrong password rejected" || bad "hybrid wrong password accepted"
+
+    # --- wrong private key rejected ---
+    "$BENC" decrypt --key "$WORK/kembad.priv" -f "$WORK/kempq.bcb" -o "$WORK/kem.bad.out" >/dev/null 2>&1
     [ $? -ne 0 ] && ok "kem wrong private key rejected" || bad "kem wrong private key accepted"
+
+    # --- tampered ciphertext rejected ---
+    cp "$WORK/kempq.bcb" "$WORK/kempq.tampered.bcb"
+    printf 'x' | dd of="$WORK/kempq.tampered.bcb" bs=1 seek=100 conv=notrunc 2>/dev/null
+    "$BENC" decrypt --key "$WORK/kem.priv" -f "$WORK/kempq.tampered.bcb" -o "$WORK/kem.tampered.out" >/dev/null 2>&1
+    [ $? -ne 0 ] && ok "kem tampered container rejected" || bad "kem tampered container accepted"
 else
-    ok "kem: skipped (liboqs not built into benc)"
+    ok "kem: skipped (not available in this build)"
 fi
 
 echo "== container format version 5 (new specifications after 1.2.0) =="
