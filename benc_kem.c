@@ -20,6 +20,8 @@ int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen, uint8_t *ss,
 int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen, const uint8_t *ct, size_t ctlen, const uint8_t *sk, size_t sklen) { (void)kem;(void)ss;(void)sslen;(void)ct;(void)ctlen;(void)sk;(void)sklen; return -1; }
 #else
 #include <stdio.h>
+static uint8_t _dbg_pk[BENC_KEM_PUBLIC_KEY_LEN];
+static uint8_t _dbg_m[32];
 
 #include <string.h>
 #include <stdlib.h>
@@ -151,7 +153,7 @@ static const int16_t zetas[142] = {
 };
 
 static void ntt(int16_t a[256]) {
-    int len, start, j, k=0;
+    int len, start, j, k=1;
     for (len = 128; len >= 2; len >>= 1) {
         for (start = 0; start < 256; start += 2*len) {
             int16_t zeta = zetas[k++];
@@ -179,9 +181,20 @@ static void intt(int16_t a[256]) {
     for (j = 0; j < 256; j++) a[j] = (int16_t)((a[j] * 3303) % KEM_Q);
 }
 
-static void poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-    int i;
-    for (i = 0; i < 256; i++) r[i] = (int16_t)(((int32_t)a[i]*b[i]) % KEM_Q);
+static void poly_mul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+    int i, j;
+    int64_t acc[256];
+    memset(acc, 0, sizeof acc);
+    for (i = 0; i < 256; i++) {
+        if (a[i]==0) continue;
+        for (j = 0; j < 256; j++) {
+            int idx = i + j;
+            int32_t prod = (int32_t)a[i] * b[j];
+            if (idx < 256) acc[idx] += prod;
+            else acc[idx - 256] -= prod;
+        }
+    }
+    for (i = 0; i < 256; i++) r[i] = (int16_t)((acc[i] % KEM_Q + KEM_Q) % KEM_Q);
 }
 
 static __attribute__((unused)) void poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
@@ -216,7 +229,8 @@ static int decomp(uint32_t x, int d) {
 static void poly_encode(uint8_t *r, const int16_t a[256], int d) {
     int i; uint32_t val=0; int bits=0; size_t idx=0;
     for (i=0;i<256;i++) {
-        val |= ((uint32_t)(a[i] & ((1<<d)-1))) << bits;
+        uint32_t c = (uint32_t)((a[i] % KEM_Q + KEM_Q) % KEM_Q);
+        val |= (c & ((1u<<d)-1)) << bits;
         bits += d;
         while (bits >= 8) { r[idx++]=val&0xFF; val>>=8; bits-=8; }
     }
@@ -244,7 +258,7 @@ static __attribute__((unused)) void pvec_dot(int16_t r[KEM_N], const pvec *a, co
     int i,j; int16_t acc[KEM_N]; memset(acc,0,sizeof acc);
     for (i=0;i<KEM_K;i++) {
         int16_t tmp[KEM_N];
-        poly_basemul(tmp, a->v[i], b->v[i]);
+        poly_mul(tmp, a->v[i], b->v[i]);
         for (j=0;j<KEM_N;j++) acc[j]=(acc[j]+tmp[j])%KEM_Q;
     }
     memcpy(r, acc, sizeof acc);
@@ -305,20 +319,18 @@ static void kpke_keygen(const uint8_t d[32], uint8_t *pk, uint8_t *sk) {
     sha3_512(d, 32, buf);
     memcpy(rho, buf, 32); memcpy(sigma, buf+32, 32);
     gen_matrix(A, rho, 0);
-    for (i=0;i<KEM_K;i++) for (int j=0;j<KEM_K;j++) ntt(A[i].v[j]);
     /* sample s, e */
     memset(&s,0,sizeof s); memset(&e,0,sizeof e);
     sample_vec(&s, sigma, KEM_ETA1, 0);
     sample_vec(&e, sigma, KEM_ETA1, KEM_K);
     /* NTT */
-    pvec_ntt(&s); pvec_ntt(&e);
     /* t = A*s + e */
     memset(&t,0,sizeof t);
     for (i=0;i<KEM_K;i++) {
         int j; int16_t acc[KEM_N]; memset(acc,0,sizeof acc);
         for (j=0;j<KEM_K;j++) {
             int16_t tmp[KEM_N];
-            poly_basemul(tmp, A[i].v[j], s.v[j]);
+            poly_mul(tmp, A[i].v[j], s.v[j]);
             for (int l=0;l<KEM_N;l++) acc[l]=(acc[l]+tmp[l])%KEM_Q;
         }
         for (int l=0;l<KEM_N;l++) t.v[i][l]=(acc[l]+e.v[i][l])%KEM_Q;
@@ -337,7 +349,6 @@ static void kpke_encrypt(const uint8_t *pk, const uint8_t m[32], const uint8_t r
     pvec_decode(&t, pk, 12);
     memcpy(rho, pk + KEM_K*KEM_N*12/8, 32);
     gen_matrix(A, rho, 1); /* transpose */
-    for (int i2=0;i2<KEM_K;i2++) for (int j2=0;j2<KEM_K;j2++) ntt(A[i2].v[j2]);
     pvec rvec, e1, u;
     memset(&rvec,0,sizeof rvec); memset(&e1,0,sizeof e1);
     sample_vec(&rvec, r, KEM_ETA1, 0);
@@ -348,19 +359,16 @@ static void kpke_encrypt(const uint8_t *pk, const uint8_t m[32], const uint8_t r
     shake256(s,33,buf,sizeof buf);
     int16_t e2[KEM_N]; cbd(e2, buf, KEM_ETA2);
 
-    /* r_hat = NTT(rvec) */
-    pvec rhat = rvec; pvec_ntt(&rhat);
+    /* u = A^T * r + e1 (normal domain) */
 
-    /* u = INTT(A^T * r_hat) + e1 */
     memset(&u,0,sizeof u);
     for (int i=0;i<KEM_K;i++) {
         int16_t acc[KEM_N]; memset(acc,0,sizeof acc);
         for (int j=0;j<KEM_K;j++) {
             int16_t tmp[KEM_N];
-            poly_basemul(tmp, A[i].v[j], rhat.v[j]);
+            poly_mul(tmp, A[i].v[j], rvec.v[j]);
             for (int l=0;l<KEM_N;l++) acc[l]=(acc[l]+tmp[l])%KEM_Q;
         }
-        intt(acc);
         for (int l=0;l<KEM_N;l++) u.v[i][l]=(acc[l]+e1.v[i][l])%KEM_Q;
     }
 
@@ -370,10 +378,9 @@ static void kpke_encrypt(const uint8_t *pk, const uint8_t m[32], const uint8_t r
         int16_t acc[KEM_N]; memset(acc,0,sizeof acc);
         for (int j=0;j<KEM_K;j++) {
             int16_t tmp[KEM_N];
-            poly_basemul(tmp, t.v[j], rhat.v[j]);
+            poly_mul(tmp, t.v[j], rvec.v[j]);
             for (int l=0;l<KEM_N;l++) acc[l]=(acc[l]+tmp[l])%KEM_Q;
         }
-        intt(acc);
         for (int l=0;l<KEM_N;l++) v[l]=(acc[l]+e2[l])%KEM_Q;
     }
     /* add decompressed message: m bits -> 0 or (q+1)/2 */
@@ -433,11 +440,9 @@ static void kpke_decrypt(const uint8_t *sk, const uint8_t *c, uint8_t m[32]) {
             int16_t tmp[KEM_N];
             /* need NTT of u[j] */
             int16_t uu[KEM_N]; memcpy(uu, u.v[j], sizeof uu);
-            ntt(uu);
-            poly_basemul(tmp, s.v[j], uu);
+            poly_mul(tmp, s.v[j], uu);
             for (int l=0;l<KEM_N;l++) acc[l]=(acc[l]+tmp[l])%KEM_Q;
         }
-        intt(acc);
         for (int l=0;l<KEM_N;l++) w[l]=(vv[l]-acc[l]+KEM_Q)%KEM_Q;
     }
     memset(m, 0, 32);
@@ -479,8 +484,11 @@ int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen,
                          uint8_t *ss, size_t *sslen,
                          const uint8_t *pk, size_t pklen) {
     if (!kem || !ct || !ctlen || !ss || !sslen || !pk) return -1;
+    memcpy(_dbg_pk, pk, BENC_KEM_PUBLIC_KEY_LEN);
     uint8_t m[32], K[32], r[32], h[32];
     for (int i=0;i<32;i++) m[i]=(uint8_t)rand();
+    memcpy(_dbg_m, m, 32);
+
     sha3_256(pk, pklen, h);
     /* G(m || H(pk)) */
     uint8_t gm[64]; uint8_t input[64];
@@ -497,6 +505,9 @@ int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen,
     sha3_256(kdfin, 64, ss);
     *ctlen = BENC_KEM_CIPHERTEXT_LEN;
     *sslen = BENC_KEM_SHARED_SECRET_LEN;
+    fprintf(stderr, "enc ss: ");
+    for (int i=0;i<8;i++) fprintf(stderr, "%02x", ss[i]);
+    fprintf(stderr, "\n");
     return 0;
 }
 
@@ -510,8 +521,18 @@ int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
     const uint8_t *pk = sk + KEM_K*KEM_N*12/8;
     const uint8_t *h = pk + BENC_KEM_PUBLIC_KEY_LEN;
     const uint8_t *z = h + 32;
+    /* verify pk from sk matches original pk */
+    fprintf(stderr, "pk_match=%d\n", (memcmp(pk, _dbg_pk, BENC_KEM_PUBLIC_KEY_LEN)==0));
+    uint8_t hcheck[32]; sha3_256(pk, BENC_KEM_PUBLIC_KEY_LEN, hcheck);
+    int hmatch = (memcmp(h, hcheck, 32) == 0);
+    fprintf(stderr, "H(pk) matches: %d\n", hmatch);
     uint8_t m[32], K[32], r[32];
-    kpke_decrypt(sk_pke, ct, m);
+    uint8_t skcopy[BENC_KEM_SECRET_KEY_LEN];
+    memcpy(skcopy, sk_pke, BENC_KEM_SECRET_KEY_LEN);
+    kpke_decrypt(skcopy, ct, m);
+    int _hamm=0;
+    for (int i=0;i<32;i++) _hamm += __builtin_popcount(_dbg_m[i]^m[i]);
+    fprintf(stderr, "hamming(m,m')=%d\n", _hamm);
 
     uint8_t input[64]; memcpy(input, m, 32); memcpy(input+32, h, 32);
     uint8_t gm[64]; sha3_512(input, 64, gm);
@@ -522,6 +543,7 @@ int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
     /* compare ct */
     int ok = 1;
     for (size_t i=0;i<ctlen;i++) if (ct[i]!=ct2[i]) { ok=0; break; }
+    fprintf(stderr, "ct_match=%d\n", ok);
 
     uint8_t hct[32]; sha3_256(ct, ctlen, hct);
     uint8_t kdfin[64];
@@ -533,6 +555,9 @@ int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
     memcpy(kdfin+32, hct, 32);
     sha3_256(kdfin, 64, ss);
     *sslen = BENC_KEM_SHARED_SECRET_LEN;
+    fprintf(stderr, "dec ss: ");
+    for (int i=0;i<8;i++) fprintf(stderr, "%02x", ss[i]);
+    fprintf(stderr, "\n");
     return 0;
 }
 #endif /* BENC_DOS */
