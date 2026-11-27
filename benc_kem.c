@@ -20,8 +20,6 @@ int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen, uint8_t *ss,
 int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen, const uint8_t *ct, size_t ctlen, const uint8_t *sk, size_t sklen) { (void)kem;(void)ss;(void)sslen;(void)ct;(void)ctlen;(void)sk;(void)sklen; return -1; }
 #else
 #include <stdio.h>
-static uint8_t _dbg_pk[BENC_KEM_PUBLIC_KEY_LEN];
-static uint8_t _dbg_m[32];
 
 #include <string.h>
 #include <stdlib.h>
@@ -445,6 +443,10 @@ static void kpke_decrypt(const uint8_t *sk, const uint8_t *c, uint8_t m[32]) {
         }
         for (int l=0;l<KEM_N;l++) w[l]=(vv[l]-acc[l]+KEM_Q)%KEM_Q;
     }
+    /* debug noise */
+    int maxw=0;
+    for (int i=0;i<KEM_N;i++) if (w[i]>maxw && w[i]<KEM_Q/2) maxw=w[i];
+    /* print max w and min (as signed) */
     memset(m, 0, 32);
     /* compress w to 1 bit */
     for (int i=0;i<256;i++) {
@@ -484,10 +486,9 @@ int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen,
                          uint8_t *ss, size_t *sslen,
                          const uint8_t *pk, size_t pklen) {
     if (!kem || !ct || !ctlen || !ss || !sslen || !pk) return -1;
-    memcpy(_dbg_pk, pk, BENC_KEM_PUBLIC_KEY_LEN);
     uint8_t m[32], K[32], r[32], h[32];
     for (int i=0;i<32;i++) m[i]=(uint8_t)rand();
-    memcpy(_dbg_m, m, 32);
+    static uint8_t _dm[32]; memcpy(_dm, m, 32);
 
     sha3_256(pk, pklen, h);
     /* G(m || H(pk)) */
@@ -505,9 +506,6 @@ int benc_kem_encapsulate(benc_kem *kem, uint8_t *ct, size_t *ctlen,
     sha3_256(kdfin, 64, ss);
     *ctlen = BENC_KEM_CIPHERTEXT_LEN;
     *sslen = BENC_KEM_SHARED_SECRET_LEN;
-    fprintf(stderr, "enc ss: ");
-    for (int i=0;i<8;i++) fprintf(stderr, "%02x", ss[i]);
-    fprintf(stderr, "\n");
     return 0;
 }
 
@@ -522,17 +520,8 @@ int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
     const uint8_t *h = pk + BENC_KEM_PUBLIC_KEY_LEN;
     const uint8_t *z = h + 32;
     /* verify pk from sk matches original pk */
-    fprintf(stderr, "pk_match=%d\n", (memcmp(pk, _dbg_pk, BENC_KEM_PUBLIC_KEY_LEN)==0));
-    uint8_t hcheck[32]; sha3_256(pk, BENC_KEM_PUBLIC_KEY_LEN, hcheck);
-    int hmatch = (memcmp(h, hcheck, 32) == 0);
-    fprintf(stderr, "H(pk) matches: %d\n", hmatch);
     uint8_t m[32], K[32], r[32];
-    uint8_t skcopy[BENC_KEM_SECRET_KEY_LEN];
-    memcpy(skcopy, sk_pke, BENC_KEM_SECRET_KEY_LEN);
-    kpke_decrypt(skcopy, ct, m);
-    int _hamm=0;
-    for (int i=0;i<32;i++) _hamm += __builtin_popcount(_dbg_m[i]^m[i]);
-    fprintf(stderr, "hamming(m,m')=%d\n", _hamm);
+    kpke_decrypt(sk_pke, ct, m);
 
     uint8_t input[64]; memcpy(input, m, 32); memcpy(input+32, h, 32);
     uint8_t gm[64]; sha3_512(input, 64, gm);
@@ -543,7 +532,6 @@ int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
     /* compare ct */
     int ok = 1;
     for (size_t i=0;i<ctlen;i++) if (ct[i]!=ct2[i]) { ok=0; break; }
-    fprintf(stderr, "ct_match=%d\n", ok);
 
     uint8_t hct[32]; sha3_256(ct, ctlen, hct);
     uint8_t kdfin[64];
@@ -555,9 +543,6 @@ int benc_kem_decapsulate(benc_kem *kem, uint8_t *ss, size_t *sslen,
     memcpy(kdfin+32, hct, 32);
     sha3_256(kdfin, 64, ss);
     *sslen = BENC_KEM_SHARED_SECRET_LEN;
-    fprintf(stderr, "dec ss: ");
-    for (int i=0;i<8;i++) fprintf(stderr, "%02x", ss[i]);
-    fprintf(stderr, "\n");
     return 0;
 }
 #endif /* BENC_DOS */
