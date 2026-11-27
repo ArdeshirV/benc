@@ -21,7 +21,7 @@
 
 ## 🔐 Technical Summary
 
-> **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum ML-KEM-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, FreeBSD, and DOS** with **no runtime dependencies at all** — ML-KEM-768 is implemented natively in-tree.
+> **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum Kyber-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, FreeBSD, and DOS** with **no runtime dependencies at all** — the pq-crystals Kyber-768 reference implementation is vendored in-tree.
 
 ---
 
@@ -358,10 +358,13 @@ The KEM public key and ciphertext are base64 in the header and are covered by
 the HMAC tag like every other authenticated header field. The matching command
 line options are `--kem`, `--key`, `--hybrid` and `--keygen`.
 
-> ℹ️ ML-KEM-768 is implemented **natively** in `benc_kem.c` (FIPS 203) — no
-> external library is required and the post-quantum options are always available.
-> Full correctness verification against the FIPS 203 test vectors is ongoing;
-> the password-based path remains the recommended, fully-verified mode.
+> ℹ️ Kyber-768 is the official pq-crystals reference implementation, vendored
+> under `vendor/kyber/` (public domain / Apache-2.0) and wrapped by
+> `benc_kem.c` — no external library is required and the post-quantum options
+> are always available. This is the Kyber round-3 encoding that ML-KEM-768 is
+> based on, not the final FIPS 203 KDF, so keys are not interchangeable with
+> other ML-KEM implementations. The password-based path remains the
+> recommended, fully-verified mode.
 
 ---
 
@@ -511,7 +514,7 @@ payloads are stored uncompressed and only small files fit in memory — see
 ```text
 benc.c               CLI, container format and encryption core
 benc_platform.h      platform abstraction layer (OS, tty, file, path, entropy)
-benc_kem.c           native ML-KEM-768 (FIPS 203) post-quantum key encapsulation
+benc_kem.c           Kyber-768 adapter over the vendored reference implementation
 benc_kem.h           KEM public interface
 benc_codecs.c        native LZMA2 and Zstd codecs
 benc_codecs.h        codec interface

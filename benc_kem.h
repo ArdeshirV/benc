@@ -6,13 +6,16 @@
  * functions below.  That keeps it possible to support a different KEM
  * implementation later, or to build without any post-quantum support at all.
  *
- * The implementation below wraps liboqs (https://github.com/open-quantum-safe/liboqs),
- * MIT licensed, NIST FIPS 203 reference implementation of ML-KEM-768.
+ * The backend is the pq-crystals Kyber-768 reference implementation,
+ * vendored under vendor/kyber (public domain / Apache-2.0) and wrapped by
+ * benc_kem.c.  No external library is required.  Keys use the Kyber-768
+ * encoding (pk 1184, sk 2400, ct 1088), which is the basis of ML-KEM-768 but
+ * not byte-compatible with the final FIPS 203 KDF, so they are not
+ * interchangeable with other ML-KEM implementations.
  *
- * All of this is compiled ONLY when BENC_WITH_MLKEM is defined (see Makefile).
- * When liboqs is unavailable the Makefile builds without BENC_WITH_MLKEM and
- * post-quantum commands are simply not offered; existing password-only
- * containers are unaffected.
+ * On 16-bit DOS the implementation is compiled out and the functions are
+ * stubs; post-quantum commands are simply not offered and existing
+ * password-only containers are unaffected.
  */
 
 #ifndef BENC_KEM_H
@@ -25,9 +28,9 @@
 extern "C" {
 #endif
 
-/* ML-KEM-768 sizes, per NIST FIPS 203. */
+/* Kyber-768 / ML-KEM-768 sizes. */
 #define BENC_KEM_ALG_NAME     "ml-kem-768"
-#define BENC_KEM_PUBLIC_KEY_LEN  1168
+#define BENC_KEM_PUBLIC_KEY_LEN  1184
 #define BENC_KEM_SECRET_KEY_LEN  2400
 #define BENC_KEM_CIPHERTEXT_LEN  1088
 #define BENC_KEM_SHARED_SECRET_LEN 32

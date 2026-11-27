@@ -1249,6 +1249,48 @@ static int b64_dec_finish(b64_dec *d)
     return b64_dec_flush(d);
 }
 
+/* Sink that copies decoded bytes into a caller-provided buffer. */
+typedef struct {
+    uint8_t *out;
+    size_t   cap;
+    size_t   len;
+} b64_bufctx;
+
+static int b64_buf_sink(void *ctx, uint8_t *data, size_t len)
+{
+    b64_bufctx *b = (b64_bufctx *)ctx;
+
+    if (b->len + len > b->cap)
+        return -1;
+    memcpy(b->out + b->len, data, len);
+    b->len += len;
+    return 0;
+}
+
+/* decode a header field of arbitrary length into a fixed buffer */
+static int b64_decode_buf(const char *s, uint8_t *out, size_t cap, size_t *outlen)
+{
+    b64_dec *d;
+    b64_bufctx b;
+    int r = -1;
+
+    d = (b64_dec *)calloc(1, sizeof *d);
+    if (!d)
+        return -1;
+    b.out = out;
+    b.cap = cap;
+    b.len = 0;
+    d->sink = b64_buf_sink;
+    d->ctx = &b;
+    if (b64_dec_feed(d, (const uint8_t *)s, strlen(s)) == 0 &&
+        b64_dec_finish(d) == 0) {
+        *outlen = b.len;
+        r = 0;
+    }
+    free(d);
+    return r;
+}
+
 /* decode a short string (header fields) */
 static int b64_decode(const char *s, uint8_t *out, size_t cap, size_t *outlen)
 {
@@ -1735,7 +1777,7 @@ static int parse_header(FILE *fp, benc_header *h)
             break;
         case SEEN_KEM_PUB_KEY: {
             size_t n;
-            if (b64_decode(val, h->kem_pub_key, sizeof h->kem_pub_key, &n) ||
+            if (b64_decode_buf(val, h->kem_pub_key, sizeof h->kem_pub_key, &n) ||
                 n > BENC_KEM_PUBLIC_KEY_LEN)
                 return failc(RC_FORMAT, "invalid KEM public key");
             h->kem_pub_key_len = n;
@@ -1743,7 +1785,7 @@ static int parse_header(FILE *fp, benc_header *h)
         }
         case SEEN_KEM_CT: {
             size_t n;
-            if (b64_decode(val, h->kem_ct, sizeof h->kem_ct, &n) ||
+            if (b64_decode_buf(val, h->kem_ct, sizeof h->kem_ct, &n) ||
                 n > BENC_KEM_CIPHERTEXT_LEN)
                 return failc(RC_FORMAT, "invalid KEM ciphertext");
             h->kem_ct_len = n;
@@ -3335,9 +3377,9 @@ out:
  * Field order matches the ASCII header text; salt/nonce/name are base64. */
 static int parse_canonical(const char *s, benc_header *h)
 {
-    char buf[2048];
-    char *fields[16];
-    size_t flen[16];
+    char buf[8192];
+    char *fields[20];
+    size_t flen[20];
     int ntok = 0;
     char *p;
     unsigned long seen = 0;
@@ -3354,7 +3396,7 @@ static int parse_canonical(const char *s, benc_header *h)
             buf[--bn] = '\0';
     }
     p = buf;
-    while (ntok < 16) {
+    while (ntok < (int)(sizeof fields / sizeof fields[0])) {
         char *bar = strchr(p, '|');
         if (bar)
             *bar = '\0';
@@ -3453,6 +3495,46 @@ static int parse_canonical(const char *s, benc_header *h)
             h->size = v;
             h->size_known = 1;
         }
+        if (h->version >= BENC_FMT_VERSION) {
+            /* v5 fields: ...|size|mode|kem|kem-public-key|kem-ciphertext */
+            size_t n;
+            if (ntok < 18)
+                return -1;
+            if (seen & SEEN_MODE) return -1;
+            if (strcmp(fields[14], "password") == 0)
+                h->mode = 0;
+            else if (strcmp(fields[14], "pq") == 0)
+                h->mode = 1;
+            else if (strcmp(fields[14], "hybrid") == 0)
+                h->mode = 2;
+            else
+                return -1;
+            seen |= SEEN_MODE;
+            if (seen & SEEN_KEM) return -1;
+            if (strcmp(fields[15], "none") == 0)
+                h->kem_alg = 0;
+            else if (strcmp(fields[15], "ml-kem-768") == 0)
+                h->kem_alg = 1;
+            else
+                return -1;
+            seen |= SEEN_KEM;
+            if (fields[16][0] != '\0') {
+                if (b64_decode_buf(fields[16], h->kem_pub_key,
+                                   sizeof h->kem_pub_key, &n) ||
+                    n > BENC_KEM_PUBLIC_KEY_LEN)
+                    return -1;
+                h->kem_pub_key_len = n;
+                seen |= SEEN_KEM_PUB_KEY;
+            }
+            if (fields[17][0] != '\0') {
+                if (b64_decode_buf(fields[17], h->kem_ct,
+                                   sizeof h->kem_ct, &n) ||
+                    n > BENC_KEM_CIPHERTEXT_LEN)
+                    return -1;
+                h->kem_ct_len = n;
+                seen |= SEEN_KEM_CT;
+            }
+        }
     } else {
         /* legacy field order: ver|kdf|iters|salt|nonce|name|size */
         if (ntok < 8) return -1;
@@ -3549,7 +3631,6 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
         size_t hn = fread(head, 1, sizeof head, in);
         if (hn >= 4 && memcmp(head, "benc|", 4) == 0) {
             bin = 1;
-            char canon_bin[2048];
             size_t cn = 0;
             int ch, got = 0;
             benc_fseek(in, 0, SEEK_SET);
@@ -3561,15 +3642,17 @@ static int cmd_decrypt(const char *in_path, const char *out_path, const opts *o)
                     got = 1;
                     break;
                 }
-                if (cn < sizeof canon_bin - 1)
-                    canon_bin[cn++] = (char)ch;
+                if (cn >= sizeof canon - 1) {
+                    failc(RC_FORMAT, "container header too long");
+                    goto done;
+                }
+                canon[cn++] = (char)ch;
             }
-            canon_bin[cn] = '\0';
-            if (parse_canonical(canon_bin, &h)) {
+            canon[cn] = '\0';
+            if (parse_canonical(canon, &h)) {
                 failc(RC_FORMAT, "invalid binary container header");
                 goto done;
             }
-            memcpy(canon, canon_bin, cn + 1);
         } else {
             benc_fseek(in, 0, SEEK_SET);
             if (parse_header(in, &h))
@@ -3808,7 +3891,7 @@ static int cmd_info(const char *path)
     benc_header h;
     uint64_t body = 0;
     char num[24];
-    char canon_bin[2048];
+    char canon_bin[8192];
     int bin = 0;
 
     if (!in)
@@ -3829,8 +3912,11 @@ static int cmd_info(const char *path)
                     got = 1;
                     break;
                 }
-                if (cn < sizeof canon_bin - 1)
-                    canon_bin[cn++] = (char)ch;
+                if (cn >= sizeof canon_bin - 1) {
+                    fclose(in);
+                    return failc(RC_FORMAT, "container header too long");
+                }
+                canon_bin[cn++] = (char)ch;
             }
             canon_bin[cn] = '\0';
             if (parse_canonical(canon_bin, &h)) {

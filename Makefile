@@ -59,9 +59,15 @@ LDLIBS   ?=
 PREFIX   ?= /usr/local
 STATIC   ?= 0
 
-# ML-KEM-768 (post-quantum key encapsulation) is now implemented natively
-# in benc_kem.c; no external library (liboqs) is required. 100% dependency-free.
-BENC_EXTRA_SRC   = benc_kem.c
+# Kyber-768 (post-quantum key encapsulation): the pq-crystals reference
+# implementation is vendored in vendor/kyber; no external library is needed.
+BENC_EXTRA_SRC   = benc_kem.c \
+                   vendor/kyber/kem.c vendor/kyber/indcpa.c \
+                   vendor/kyber/polyvec.c vendor/kyber/poly.c \
+                   vendor/kyber/ntt.c vendor/kyber/reduce.c \
+                   vendor/kyber/cbd.c vendor/kyber/verify.c \
+                   vendor/kyber/fips202.c vendor/kyber/symmetric-shake.c \
+                   vendor/kyber/randombytes.c
 BENC_EXTRA_LIBS  =
 BENC_DEFS        =
 
