@@ -59,7 +59,7 @@
 /* ------------------------------------------------------------------ */
 
 #define BENC_NAME         "benc"
-#define BENC_VERSION      "1.7.0"
+#define BENC_VERSION      "1.8.0"
 #define BENC_FMT_VERSION  5u          /* what new containers are written as */
 #define BENC_FMT_V4       4u          /* previous container format */
 #define BENC_FMT_LEGACY   1u          /* oldest container still readable    */
@@ -2183,7 +2183,26 @@ static const char *ram_temp_dir(void)
     return "C:\\Windows\\Temp";
 
 #else
-    return "/dev/shm";
+    static char buf[1024];
+    const char *cand;
+
+    /* /dev/shm if available and writable */
+    if (access("/dev/shm", W_OK) == 0) {
+        snprintf(buf, sizeof buf, "%s", "/dev/shm");
+        return buf;
+    }
+    /* TMPDIR */
+    cand = getenv("TMPDIR");
+    if (cand && cand[0] == '/' && access(cand, W_OK) == 0) {
+        snprintf(buf, sizeof buf, "%s", cand);
+        return buf;
+    }
+    /* fallback: /tmp */
+    if (access("/tmp", W_OK) == 0) {
+        snprintf(buf, sizeof buf, "%s", "/tmp");
+        return buf;
+    }
+    return ".";
 #endif
 }
 

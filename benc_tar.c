@@ -417,6 +417,33 @@ int benc_tar_extract(const char *src, const char *dest,
             }
             size = any ? v : 0;
         }
+        /* --- security: reject traversal / absolute / NUL names --- */
+        {
+            size_t ni;
+            /* reject embedded NUL */
+            for (ni = 0; ni < BC_TAR_NAME_MAX && name[ni]; ni++) {}
+            /* name must not contain NUL bytes (already C-string, but check prefix) */
+            if (strlen(name) >= BC_TAR_NAME_MAX - 1)
+                return -1;
+            /* reject absolute */
+            if (name[0] == '/' || name[0] == '\\')
+                return -1;
+            /* reject drive letter (Windows) */
+            if (strlen(name) >= 2 && name[1] == ':')
+                return -1;
+            /* reject any component that is ".." or empty */
+            {
+                char tmp[BC_TAR_NAME_MAX];
+                char *tok;
+                snprintf(tmp, sizeof tmp, "%s", name);
+                tok = strtok(tmp, "/");
+                while (tok) {
+                    if (tok[0] == '\0' || (tok[0]=='.' && tok[1]=='.' && tok[2]=='\0'))
+                        return -1;
+                    tok = strtok(NULL, "/");
+                }
+            }
+        }
         if (snprintf(full, sizeof full, "%s/%s", dest, name) >= (int)sizeof full)
             return -1;
         if (typeflag == '5') {
@@ -435,14 +462,9 @@ int benc_tar_extract(const char *src, const char *dest,
                 *slash = '/';
             }
             if (typeflag == '2') {
-                char linkname[101];
-                memcpy(linkname, h + 157, 100);
-                linkname[100] = '\0';
-                remove(full);
-                if (symlink(linkname, full) != 0) {
-                    free(in);
-                    return -1;
-                }
+                /* refuse symlinks entirely (security: symlink escape) */
+                free(in);
+                return -1;
             } else {
                 if (size > len - pos - BC_TAR_BLOCK) {
                     free(in);
