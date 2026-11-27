@@ -4414,21 +4414,52 @@ int main(int argc, char **argv)
         benc_kem *kem = benc_kem_new("ml-kem-768");
         uint8_t pk[BENC_KEM_PUBLIC_KEY_LEN], sk[BENC_KEM_SECRET_KEY_LEN];
         size_t pklen, sklen;
-        char path[1024];
+        char pubpath[1024], privpath[1024];
         FILE *f;
         if (!kem) return failc(RC_UNSUPPORTED, "KEM not available");
         if (benc_kem_keypair(kem, pk, &pklen, sk, &sklen)) {
             benc_kem_free(kem);
+            benc_wipe(sk, sizeof sk);
             return failc(RC_ERR, "key generation failed");
         }
-        snprintf(path, sizeof path, "%s.pub", base);
-        f = fopen(path, "wb");
-        if (f) { fwrite(pk,1,pklen,f); fclose(f); }
-        snprintf(path, sizeof path, "%s.priv", base);
-        f = fopen(path, "wb");
-        if (f) { fwrite(sk,1,sklen,f); fclose(f); }
-        benc_kem_free(kem);
+        snprintf(pubpath, sizeof pubpath, "%s.pub", base);
+        snprintf(privpath, sizeof privpath, "%s.priv", base);
+
+        if (!o.force) {
+            FILE *probe = fopen(privpath, "rb");
+            if (probe) { fclose(probe); benc_kem_free(kem); benc_wipe(sk, sizeof sk);
+                return failc(RC_OUTPUT, "private key '%s' already exists (use -f to overwrite)", privpath); }
+            probe = fopen(pubpath, "rb");
+            if (probe) { fclose(probe); benc_kem_free(kem); benc_wipe(sk, sizeof sk);
+                return failc(RC_OUTPUT, "public key '%s' already exists (use -f to overwrite)", pubpath); }
+        }
+
+        f = fopen(privpath, "wb");
+        if (!f || fwrite(sk, 1, sklen, f) != sklen || fclose(f) != 0) {
+            if (f) fclose(f);
+            remove(privpath);
+            benc_kem_free(kem); benc_wipe(sk, sizeof sk);
+            return failc(RC_OUTPUT, "cannot write private key '%s'", privpath);
+        }
+#if BENC_POSIX
+        chmod(privpath, 0600);
+#endif
+        f = fopen(pubpath, "wb");
+        if (!f || fwrite(pk, 1, pklen, f) != pklen || fclose(f) != 0) {
+            if (f) fclose(f);
+            remove(privpath);
+            remove(pubpath);
+            benc_kem_free(kem); benc_wipe(sk, sizeof sk);
+            return failc(RC_OUTPUT, "cannot write public key '%s'", pubpath);
+        }
+
         printf("Generated key pair: %s.pub / %s.priv\n", base, base);
+        printf("  fingerprint (first 8 bytes of public key): ");
+        for (int i = 0; i < 8; i++) printf("%02x", pk[i]);
+        printf("\n");
+        benc_kem_free(kem);
+        benc_wipe(sk, sizeof sk);
+        benc_wipe(pk, sizeof pk);
         return RC_OK;
     }
 
