@@ -13,11 +13,15 @@ LIBBENC_SRCS = libbenc/src/benc.c libbenc/src/benc_codecs.c libbenc/src/benc_tar
                vendor/kyber/fips202.c vendor/kyber/symmetric-shake.c \
                vendor/kyber/randombytes.c
 
-BENC_SRCS = benc/src/main.c
+BENC_SRCS = cli/src/main.c
 
-all: benc-cli
+all: benc
+
+native-optimized:
+	$(MAKE) CFLAGS="-O3 -march=native -std=c99 -Wall -Wextra -Wpedantic -Ilibbenc/include -Ilibbenc/include/benc -Ilibbenc/src"
 
 libbenc/libbenc.a: $(LIBBENC_SRCS)
+	@mkdir -p libbenc/build
 	@mkdir -p libbenc/build
 	$(CC) $(CFLAGS) -c libbenc/src/benc.c -o libbenc/build/benc.o
 	$(CC) $(CFLAGS) -c libbenc/src/benc_codecs.c -o libbenc/build/benc_codecs.o
@@ -36,14 +40,14 @@ libbenc/libbenc.a: $(LIBBENC_SRCS)
 	$(CC) $(CFLAGS) -c vendor/kyber/randombytes.c -o libbenc/build/kyber_randombytes.o
 	ar rcs $@ libbenc/build/*.o
 
-benc-cli: libbenc/libbenc.a benc/src/main.c
-	$(CC) $(CFLAGS) -Ilibbenc/include -o benc-cli benc/src/main.c -Llibbenc -lbenc $(LDFLAGS) $(LDLIBS)
+benc: libbenc/libbenc.a cli/src/main.c
+	$(CC) $(CFLAGS) -Ilibbenc/include -o benc cli/src/main.c -Llibbenc -lbenc $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f benc libbenc/libbenc.a
 	rm -rf libbenc/build
 
-test: benc-cli
-	sh tests/run_tests.sh ./benc-cli
+test: benc
+	sh tests/run_tests.sh ./benc
 
-.PHONY: all clean test
+.PHONY: all clean test native-optimized
