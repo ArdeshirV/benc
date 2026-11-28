@@ -51,3 +51,11 @@ test: benc
 	sh tests/run_tests.sh ./benc
 
 .PHONY: all clean test native-optimized
+
+all-platforms:
+	@echo "Building native platform..."
+	$(MAKE) clean && $(MAKE)
+	@echo "Done. Cross-platform builds require appropriate toolchains."
+	@echo "See README for platform-specific build instructions."
+
+.PHONY: all-platforms
