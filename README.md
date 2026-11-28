@@ -391,6 +391,111 @@ half-written output.
 
 ---
 
+<a id="using-libbenc"></a>
+## 🧩 Using `libbenc` in your own C++ code
+
+`benc` is built on top of **libbenc**, a self-contained, dependency-free C99
+library. You can link it into your own C or C++ programs.
+
+### 1. Get the library
+
+```console
+make library              # builds dist/libbenc/  (static + shared)
+make library TYPE=static  # static only
+make library TYPE=shared  # shared only
+```
+
+The distribution contains only:
+
+```text
+dist/libbenc/
+├── include/benc/
+│   ├── benc.h
+│   ├── benc_export.h
+│   └── benc_version.h
+└── lib/
+    ├── libbenc.a
+    └── libbenc.so  (or .dylib / .dll)
+```
+
+### 2. Include and link
+
+```cpp
+#include <benc/benc.h>
+#include <cstdio>
+#include <cstring>
+
+int main() {
+    const char *msg = "hello, libbenc";
+    const char *pw  = "correct horse battery staple";
+
+    benc_encrypt_opts eo;
+    benc_encrypt_opts_init(&eo);
+    eo.password = reinterpret_cast<const uint8_t *>(pw);
+    eo.password_len = std::strlen(pw);
+    eo.compression = BENC_COMP_ZSTD;
+
+    benc_buf ct = BENC_BUF_INIT, pt = BENC_BUF_INIT;
+    benc_status s = benc_encrypt(
+        reinterpret_cast<const uint8_t *>(msg), std::strlen(msg), &eo, &ct);
+    if (s != BENC_OK) {
+        std::fprintf(stderr, "encrypt: %s\n", benc_strerror(s));
+        return 1;
+    }
+
+    benc_decrypt_opts dopt;
+    benc_decrypt_opts_init(&dopt);
+    dopt.password = reinterpret_cast<const uint8_t *>(pw);
+    dopt.password_len = std::strlen(pw);
+    s = benc_decrypt(ct.data, ct.len, &dopt, &pt, nullptr);
+    if (s != BENC_OK) {
+        benc_buf_free(&ct);
+        std::fprintf(stderr, "decrypt: %s\n", benc_strerror(s));
+        return 2;
+    }
+
+    std::printf("%.*s\n", (int)pt.len, reinterpret_cast<const char *>(pt.data));
+    benc_buf_free(&ct);
+    benc_buf_free_secure(&pt);
+    return 0;
+}
+```
+
+### 3. Compile
+
+```console
+# static link (self-contained executable)
+g++ -std=c++17 -O2 -I dist/libbenc/include example.cpp dist/libbenc/lib/libbenc.a -o example
+
+# dynamic link
+g++ -std=c++17 -O2 -I dist/libbenc/include example.cpp -L dist/libbenc/lib -lbenc -o example
+export LD_LIBRARY_PATH=dist/libbenc/lib:$LD_LIBRARY_PATH
+./example
+```
+
+### 4. CMake
+
+```cmake
+find_package(libbenc REQUIRED)
+target_link_libraries(myapp PRIVATE libbenc::libbenc)
+```
+
+### Notes for C++ users
+
+- `benc_buf` is a plain C struct; free it with `benc_buf_free()` /
+  `benc_buf_free_secure()` (the latter zeroises secret plaintext).
+- All functions return `benc_status` (negative on failure); use
+  `benc_strerror()` for a human-readable message.
+- The library is **thread-safe**: independent operations may run concurrently
+  with no shared mutable state and no locks.
+- No global state, no hidden configuration — pass `benc_env`/`benc_limits`
+  explicitly (or `NULL` for defaults).
+- The library never throws; it only returns status codes.
+
+---
+
+---
+
 <a id="build"></a>
 ## 🏗️ Build
 
