@@ -1,6 +1,6 @@
 /* benc_codecs.c - self contained native LZMA2 and Zstd codecs for benc. */
 
-#include "benc_codecs.h"
+#include "benc/benc_codecs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

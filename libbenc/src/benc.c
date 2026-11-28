@@ -49,10 +49,10 @@
 #include <errno.h>
 #include <time.h>
 #include <signal.h>
-#include "benc_platform.h"
-#include "benc_codecs.h"
-#include "benc_tar.h"
-#include "benc_kem.h"
+#include "benc/benc_platform.h"
+#include "benc/benc_codecs.h"
+#include "benc/benc_tar.h"
+#include "benc/benc_kem.h"
 
 /* ------------------------------------------------------------------ */
 /* constants                                                           */
@@ -4386,7 +4386,7 @@ static cmd_t resolve_command(const char *s, int *consumed)
     return C_AUTO;
 }
 
-int main(int argc, char **argv)
+int benc_main(int argc, char **argv)
 {
     const char *pos[4];
     const char *in_path, *out_path;

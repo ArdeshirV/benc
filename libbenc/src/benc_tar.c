@@ -8,7 +8,7 @@
 #  define BC_TAR_POSIX 1
 #endif
 
-#include "benc_tar.h"
+#include "benc/benc_tar.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

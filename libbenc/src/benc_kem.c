@@ -10,8 +10,8 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "benc_platform.h"
-#include "benc_kem.h"
+#include "benc/benc_platform.h"
+#include "benc/benc_kem.h"
 
 struct benc_kem { int dummy; };
 
