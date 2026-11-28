@@ -496,6 +496,216 @@ target_link_libraries(myapp PRIVATE libbenc::libbenc)
 
 ---
 
+<a id="libbenc-api"></a>
+## 📚 libbenc API Reference
+
+All functions are declared in `<benc/benc.h>` (and `<benc/benc_fs.h>` for
+filesystem helpers). Everything is C99, `extern "C"`-safe, and thread-safe.
+
+### Status codes
+
+| Constant | Value | Meaning |
+| :--- | :---: | :--- |
+| `BENC_OK` | 0 | success |
+| `BENC_E_INTERNAL` | -1 | internal error |
+| `BENC_E_AUTH` | -2 | wrong password/key or tampered container |
+| `BENC_E_INVALID_ARG` | -3 | bad argument / option / struct |
+| `BENC_E_INPUT` | -4 | input unreadable |
+| `BENC_E_OUTPUT` | -5 | output not writable / exists without force |
+| `BENC_E_FORMAT` | -6 | not a benc container / malformed / truncated |
+| `BENC_E_UNSUPPORTED` | -7 | unsupported version / KDF / cipher / codec |
+| `BENC_E_NOMEM` | -8 | out of memory |
+| `BENC_E_PASSWORD` | -9 | missing / empty / too long password |
+| `BENC_E_CODEC` | -10 | (de)compression or tar failure |
+| `BENC_E_SELFTEST` | -11 | built-in self-test failure |
+| `BENC_E_CANCELLED` | -12 | cancelled by callback |
+| `BENC_E_LIMIT` | -13 | size / entry limit exceeded |
+| `BENC_E_RANDOM` | -14 | entropy source unavailable |
+| `BENC_E_BUFFER_TOO_SMALL` | -15 | caller buffer too small |
+
+### Constants
+
+| Constant | Value | Description |
+| :--- | :--- | :--- |
+| `BENC_KEM_PUBLIC_KEY_LEN` | 1184 | Kyber-768 public key size |
+| `BENC_KEM_SECRET_KEY_LEN` | 2400 | Kyber-768 secret key size |
+| `BENC_KEM_CIPHERTEXT_LEN` | 1088 | Kyber-768 ciphertext size |
+| `BENC_KEM_SHARED_SECRET_LEN` | 32 | shared secret size |
+| `BENC_UNLIMITED` | `UINT64_MAX` | no limit |
+
+### Enums
+
+```c
+benc_comp:    BENC_COMP_NONE (0), BENC_COMP_LZMA2 (1), BENC_COMP_ZSTD (2)
+benc_format:  BENC_FMT_BINARY (0, .bcb), BENC_FMT_TEXT (1, .bct)
+benc_mode:    BENC_MODE_PASSWORD (0), BENC_MODE_PQ (1), BENC_MODE_HYBRID (2)
+```
+
+### Core types
+
+```c
+typedef struct benc_buf {
+    uint8_t *data; size_t len, cap;
+    void (*free_fn)(void*, void*, size_t); void *free_ctx;
+} benc_buf;
+#define BENC_BUF_INIT {0,0,0,0,0}
+
+typedef struct benc_env {          /* allocator + randomness (all optional) */
+    uint32_t struct_size, flags;
+    void *(*alloc)(void*, size_t);
+    void *(*realloc)(void*, void*, size_t, size_t);
+    void (*free)(void*, void*, size_t);
+    void *alloc_ctx;
+    int  (*random)(void*, uint8_t*, size_t);  /* 0 = ok */
+    void *random_ctx;
+} benc_env;
+
+typedef struct benc_limits {       /* 0 = safe default, BENC_UNLIMITED = no limit */
+    uint32_t struct_size, flags;
+    uint64_t max_input_bytes;     /* default 1 GiB */
+    uint64_t max_output_bytes;    /* default 1 GiB (decompression-bomb guard) */
+    uint32_t max_iterations;      /* default 10,000,000 */
+    uint32_t max_tar_entries;     /* default 1,000,000 */
+    uint32_t max_path_len;        /* default 4096 */
+} benc_limits;
+
+typedef int (*benc_progress_fn)(uint64_t done, uint64_t total, void *user);
+/* non-zero return cancels the operation (BENC_E_CANCELLED) */
+```
+
+### One-shot RAM API
+
+```c
+benc_status benc_encrypt(const uint8_t *in, size_t in_len,
+                        const benc_encrypt_opts *opts, benc_buf *out);
+benc_status benc_decrypt(const uint8_t *in, size_t in_len,
+                        const benc_decrypt_opts *opts, benc_buf *out, void *info);
+size_t      benc_encrypt_bound(size_t in_len, const benc_encrypt_opts *opts);
+benc_status benc_encrypt_into(const uint8_t *in, size_t in_len,
+    const benc_encrypt_opts *opts, uint8_t *out, size_t out_cap, size_t *out_len);
+benc_status benc_decrypt_into(const uint8_t *in, size_t in_len,
+    const benc_decrypt_opts *opts, uint8_t *out, size_t out_cap,
+    size_t *out_len, void *info);
+```
+
+### Options
+
+```c
+typedef struct benc_encrypt_opts {
+    uint32_t struct_size, flags;
+    const benc_env    *env;
+    const benc_limits *limits;
+    const uint8_t *password;  size_t password_len;
+    uint32_t iterations;               /* 0 = 210000 */
+    benc_comp compression;  int32_t level;  int32_t threads;
+    benc_format format;  benc_mode mode;
+    const uint8_t *kem_public_key;  size_t kem_public_key_len;
+    const char *name;  size_t name_len;
+    benc_progress_fn progress;  void *progress_user;
+} benc_encrypt_opts;
+
+typedef struct benc_decrypt_opts {
+    uint32_t struct_size, flags;
+    const benc_env    *env;
+    const benc_limits *limits;
+    const uint8_t *password;  size_t password_len;
+    const uint8_t *kem_secret_key;  size_t kem_secret_key_len;
+    benc_progress_fn progress;  void *progress_user;
+} benc_decrypt_opts;
+```
+
+### String convenience
+
+```c
+benc_status benc_encrypt_string(const char *plaintext, const char *password,
+    const benc_encrypt_opts *opts, benc_buf *out);   /* always emits text container */
+benc_status benc_decrypt_string(const char *container, const char *password,
+    benc_buf *out);
+```
+
+### Compression only
+
+```c
+benc_status benc_compress(const void *env, int comp, int level, int threads,
+    const uint8_t *in, size_t in_len, benc_buf *out, void *limits,
+    benc_progress_fn progress, void *user);
+benc_status benc_decompress(const void *env, int comp,
+    const uint8_t *in, size_t in_len, benc_buf *out, void *limits,
+    benc_progress_fn progress, void *user);
+```
+
+### Inspection
+
+```c
+benc_status benc_container_info(const uint8_t *in, size_t in_len, void *info);
+benc_status benc_container_verify(const uint8_t *in, size_t in_len,
+    const benc_decrypt_opts *opts);   /* authenticate only, write nothing */
+```
+
+### Tar in RAM
+
+```c
+benc_status benc_tar_read(const void *env, const uint8_t *tar, size_t len,
+    int (*visit)(const void*, void*), void *user, void *limits);
+```
+
+### Keys
+
+```c
+benc_status benc_kem_keygen(const void *env,
+    uint8_t pk[BENC_KEM_PUBLIC_KEY_LEN], uint8_t sk[BENC_KEM_SECRET_KEY_LEN]);
+benc_status benc_kem_encapsulate(const void *env, uint8_t *ct, size_t *ctlen,
+    uint8_t *ss, size_t *sslen, const uint8_t *pk, size_t pklen);
+benc_status benc_kem_decapsulate(const void *env, uint8_t *ss, size_t *sslen,
+    const uint8_t *ct, size_t ctlen, const uint8_t *sk, size_t sklen);
+benc_status benc_kem_fingerprint(const uint8_t pk[BENC_KEM_PUBLIC_KEY_LEN],
+    char out_hex[17]);
+```
+
+### Utilities
+
+```c
+benc_status benc_selftest(char *report, size_t cap, size_t *report_len);
+void        benc_zeroize(void *p, size_t n);
+const char *benc_version(void);
+uint32_t    benc_abi_version(void);
+const char *benc_strerror(benc_status s);
+int         benc_status_to_exit_code(benc_status s, int cancelled_by_signal);
+const char *benc_license(void);
+void        benc_buf_free(benc_buf *b);
+void        benc_buf_free_secure(benc_buf *b);
+void        benc_env_init(benc_env *e);
+void        benc_limits_init(benc_limits *l);
+void        benc_encrypt_opts_init(benc_encrypt_opts *o);
+void        benc_decrypt_opts_init(benc_decrypt_opts *o);
+```
+
+### Filesystem module (`benc_fs.h`, `WITH_FS=1`)
+
+```c
+benc_status benc_encrypt_file(const char *in, const char *out,
+    const benc_encrypt_opts *opts, const void *fs_opts);
+benc_status benc_decrypt_file(const char *in, const char *out,
+    const benc_decrypt_opts *opts, const void *fs_opts);
+benc_status benc_encrypt_dir(const char *dir, const char *out,
+    const benc_encrypt_opts *opts, const void *fs_opts);
+benc_status benc_decrypt_dir(const char *in, const char *dest,
+    const benc_decrypt_opts *opts, const void *fs_opts);
+```
+
+### Environment variables
+
+| Variable | Meaning |
+| :--- | :--- |
+| `BENC_PASSWORD_FILE` | read password from this file |
+| `BENC_TMPDIR` | staging directory for temp files |
+| `BENC_THREADS` | worker threads for compression |
+| `NO_COLOR` | disable color/progress output |
+
+---
+
+---
+
 <a id="build"></a>
 ## 🏗️ Build
 
