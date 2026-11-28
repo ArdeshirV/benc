@@ -23,6 +23,14 @@
 
 > **benc** is a dependency-free C99 CLI that encrypts any file or directory with one password into a single portable container (binary `.bcb` by default, ASCII `.bct` on request), using **PBKDF2-HMAC-SHA256 → ChaCha20 → HMAC-SHA256** (encrypt-then-MAC) with LZMA2/Zstd compression, and supports **post-quantum Kyber-768** encapsulation with hybrid password+KEM key derivation via HKDF-SHA256 (container format v5). It builds and runs on **Windows, Linux, macOS, and FreeBSD** with **no runtime dependencies at all** — the pq-crystals Kyber-768 reference implementation is vendored in-tree.
 
+> 📦 **libbenc is a fully independent library.** Everything benc does — encryption,
+> decryption, compression, container format, tar, and post-quantum KEM — lives in
+> **libbenc**, a self-contained C99 library with no external dependencies. The
+> `benc` executable is just a thin CLI layer on top of it. You can link libbenc
+> into your own C or C++ programs and use every capability on RAM buffers and
+> strings, without ever touching the CLI. See [🧩 Using libbenc in your own C++
+> code](#using-libbenc) and the [📚 libbenc API Reference](#libbenc-api).
+
 ---
 
 ## 📖 Table of contents
