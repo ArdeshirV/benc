@@ -18,7 +18,7 @@ struct benc_kem { int dummy; };
 #include <stdlib.h>
 #include <string.h>
 
-#include "vendor/kyber/api.h"
+#include "../../vendor/kyber/api.h"
 
 /* The project's size macros must match the reference implementation. */
 typedef char benc_kem_size_check[
